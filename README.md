@@ -9,17 +9,16 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 to match th
 ## Architecture
 
 ```
- source side (sender)                                destination side (receiver)
- ┌────────────────────────────────┐                  ┌────────────────────────────────┐
- │ artifactory pod                │                  │ artifactory pod                │
- │ ┌──────────┐   ┌────────────┐  │                  │  ┌────────────┐   ┌──────────┐ │
- │ │artifactory├──▶ airlift    │  │  spool PVC       │  │ airlift    ◀───┤artifactory│ │
- │ │           │   │ (sender)  │──┼───▶ archive ─────┼──▶ (receiver) │   │           │ │
- │ └──────────┘   └────────────┘  │  one-way         │  └────────────┘   └──────────┘ │
- │     │  shared filestore PVC    │  transport       │     ▲ shared filestore PVC    │
- │     ▼                          │  (out of scope)  │     │                          │
- │  state PVC + spool PVC         │                  │  state PVC + spool PVC         │
- └────────────────────────────────┘                  └────────────────────────────────┘
+   Source side (Sender)                                        Destination side (Receiver)
+ ┌────────────────────────────────────────┐                  ┌────────────────────────────────────────┐
+ │         Artifactory Namespace          │                  │         Artifactory Namespace          │
+ │ ┌───────────────┐   ┌───────────────┐  │                  │ ┌───────────────┐    ┌──────────────┐  │
+ │ │Artifactory Pod│◀──┤Airlift Sidecar│  │                  │ │Airlift Sidecar│───▶│Atifactory Pod│  │
+ │ │               │   │   (Sender)    │──┼───▶ Transport ───┼─▶   (Receiver)  │    │              │  │
+ │ └───────────────┘   └───────────────┘  │                  │ └───────────────┘    └──────────────┘  │
+ │ - Shared filestore PVC                 │                  │ - Shared filestore PVC                 │
+ │ - State PVC + spool PVC                │                  │ - State PVC + spool PVC                │
+ └────────────────────────────────────────┘                  └────────────────────────────────────────┘
 ```
 
 ### What the sender does each cycle
