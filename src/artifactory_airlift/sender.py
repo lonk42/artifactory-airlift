@@ -174,8 +174,23 @@ def _prune_history(
     snapshots_dir: Path,
     exports_dir: Path,
 ) -> None:
-    state.prune_oldest(snapshots_dir, keep=settings.history_keep, pattern="*.jsonl")
-    # Exports are directories (Artifactory wrote into them); prune by ordered list.
+    # Snapshots: GFS retention. Each tier keeps the newest snapshot per
+    # non-empty bucket within its wall-clock window from now. The just-
+    # written snapshot always wins its current bucket in any non-zero
+    # tier, so the diff baseline for the next cycle is preserved.
+    snapshot_paths = list(snapshots_dir.glob("*.jsonl"))
+    keepers = state.gfs_keepers(
+        snapshot_paths,
+        hours=settings.snapshot_retention_hours,
+        days=settings.snapshot_retention_days,
+        months=settings.snapshot_retention_months,
+    )
+    state.prune_to_keepers(snapshots_dir, keepers, pattern="*.jsonl")
+
+    # Exports remain count-based; they are heavy scratch space and decoupled
+    # from snapshot retention (a 6-month-old snapshot kept by the monthly
+    # tier has no matching export tree, which is fine for the breadcrumb
+    # use case).
     entries = sorted(p for p in exports_dir.iterdir() if p.is_dir())
     if len(entries) > settings.history_keep:
         for p in entries[: len(entries) - settings.history_keep]:

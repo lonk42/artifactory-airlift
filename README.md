@@ -28,7 +28,7 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 to match th
 3. Two-pointer set-diff against the previous snapshot to compute new `(sha1, repo, path)` triples.
 4. For each new sha1, locate the raw blob at `<FILESTORE_ROOT>/<sha1[:2]>/<sha1>` (airlift mounts the filestore PVC read-only on the sender side).
 5. Build `<cycle_id>.tar.zst` containing `manifest.json`, the full `metadata/` subtree from the export, and `blobs/<aa>/<sha1>` entries. The archive is finalised atomically (`.partial` → `os.rename`).
-6. Prune `state/snapshots/` and `state/exports/` past the configured history depth.
+6. Prune `state/snapshots/` under a tiered GFS retention policy (hours/days/months); prune `state/exports/` past the configured history depth.
 
 ### What the receiver does each cycle
 
@@ -155,6 +155,14 @@ The Helm chart writes the credentials into a Kubernetes Secret named `artifactor
 
 The sidecar reads `/etc/airlift/config.yaml` from the mounted ConfigMap and overlays env vars prefixed `AIRLIFT_`. All keys are optional except auth.
 
+### Snapshot retention (GFS)
+
+`state/snapshots/*.jsonl` is the breadcrumb trail used both as the next cycle's diff baseline and as the future basis for backfill. The three `snapshot_retention_*` keys give a grandfather-father-son retention policy: each tier independently keeps the newest snapshot in every non-empty bucket within its wall-clock window from now, and the final keep set is the union across tiers (a single snapshot can satisfy multiple tiers).
+
+Example: `snapshot_retention_hours: 10`, `snapshot_retention_days: 30`, `snapshot_retention_months: 12` retains one snapshot per hour for the last ten hours, one per day for the last thirty days, and one per calendar month for the last twelve months. At least one of the three must be greater than zero; months are real calendar months, not thirty-day windows.
+
+Note that `state/exports/<cycle_id>/` (the raw Artifactory export trees) is retained by count (`history_keep`) and is decoupled from snapshot retention. A six-month-old snapshot kept by the monthly tier has no matching export directory; the snapshot is still useful as a backfill reference because Artifactory's filestore deduplicates by sha1, and the export tree can be regenerated on demand.
+
 | Key (yaml)              | Env                              | Default                                                  | Description                                                                                                                  |
 | ----------------------- | -------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `mode`                  | `AIRLIFT_MODE`                   | `sender`                                                 | Which loop to run: `sender` exports + diffs + spools archives; `receiver` ingests archives + writes blobs + imports repos.   |
@@ -164,8 +172,11 @@ The sidecar reads `/etc/airlift/config.yaml` from the mounted ConfigMap and over
 | `artifactory_username`  | `AIRLIFT_ARTIFACTORY_USERNAME`   | `""`                                                     | Admin username for basic auth. When both username and password are set, basic auth takes precedence over `artifactory_token`.|
 | `artifactory_password`  | `AIRLIFT_ARTIFACTORY_PASSWORD`   | `""`                                                     | Admin password paired with `artifactory_username`. Inject via a Secret; the chart writes this into `artifactory-airlift-token`.|
 | `cycle_seconds`         | `AIRLIFT_CYCLE_SECONDS`          | `300`                                                    | Seconds between cycles. Sender: time between exports/diffs. Receiver: poll interval for new archives in the spool dir.       |
-| `history_keep`          | `AIRLIFT_HISTORY_KEEP`           | `24`                                                     | Sender-only. Number of past snapshots and raw export trees to retain under `state/` before pruning the oldest.               |
+| `history_keep`          | `AIRLIFT_HISTORY_KEEP`           | `24`                                                     | Sender-only. Number of raw export trees to retain under `state/exports/` before pruning the oldest. Snapshot baselines use the GFS retention keys below.|
 | `done_keep_hours`       | `AIRLIFT_DONE_KEEP_HOURS`        | `72`                                                     | Receiver-only. How long to retain processed archives under `spool/.done/` before deleting them. Set `0` to keep forever.     |
+| `snapshot_retention_hours`  | `AIRLIFT_SNAPSHOT_RETENTION_HOURS`  | `0` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per hour-bucket for the last N hour-buckets (wall clock).        |
+| `snapshot_retention_days`   | `AIRLIFT_SNAPSHOT_RETENTION_DAYS`   | `3` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per day-bucket for the last N day-buckets (UTC).                  |
+| `snapshot_retention_months` | `AIRLIFT_SNAPSHOT_RETENTION_MONTHS` | `0` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per calendar-month bucket for the last N months. Real calendar months. |
 | `filestore_root`        | `AIRLIFT_FILESTORE_ROOT`         | `/var/opt/jfrog/artifactory/data/artifactory/filestore`  | Path to Artifactory's binarystore. Sender reads blobs by sha1; receiver writes blobs into `<root>/<sha1[:2]>/<sha1>`.        |
 | `artifactory_tmp`       | `AIRLIFT_ARTIFACTORY_TMP`        | `/var/opt/jfrog/artifactory/data/artifactory/tmp`        | Artifactory's tmp dir. Reserved for future use; currently informational.                                                     |
 | `state_dir`             | `AIRLIFT_STATE_DIR`              | `/var/airlift/state`                                     | Durable per-side state (snapshots, cursor, processed ledger, lockfile, extracted import trees). Must be on a PVC.            |
@@ -238,4 +249,3 @@ kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- rm -f /var
 - **Logging readability.** Logs are JSON objects; stdout should be more parseable, with JSON relegated to debug logging.
 - **Metadata snapshot de-duplication.** Metadata exports should be ignored if there are no differences, to reduce unnecessary retention.
 - **Hooks for external alerting.** On partial and full failures you are gonna wanna know
-- **Metadata retention periods.** The basic x count retention works but a more granular x hours, x days, x months would be good for backfilling longer desyncs.

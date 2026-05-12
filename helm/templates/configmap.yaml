@@ -16,4 +16,7 @@ data:
     cycle_seconds: {{ .Values.cycleSeconds }}
     history_keep: {{ .Values.historyKeep }}
     done_keep_hours: {{ .Values.doneKeepHours }}
+    snapshot_retention_hours: {{ .Values.snapshotRetentionHours }}
+    snapshot_retention_days: {{ .Values.snapshotRetentionDays }}
+    snapshot_retention_months: {{ .Values.snapshotRetentionMonths }}
     log_level: {{ .Values.logLevel | quote }}

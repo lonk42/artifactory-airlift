@@ -35,6 +35,17 @@ artifactory:
 cycleSeconds: 300
 historyKeep: 24
 doneKeepHours: 72
+
+# GFS retention for sender-side snapshot baselines (state/snapshots/*.jsonl).
+# Each tier keeps one snapshot per bucket for the configured count of
+# buckets, measured from now (wall clock). The kept set is the union of
+# all three tiers; a single snapshot can satisfy more than one tier.
+# Months are real calendar months (not 30-day windows). At least one
+# tier must be > 0.
+snapshotRetentionHours: 0
+snapshotRetentionDays: 3
+snapshotRetentionMonths: 0
+
 logLevel: INFO
 
 # Storage.

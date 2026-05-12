@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Mode = Literal["sender", "receiver"]
@@ -33,10 +33,33 @@ class Settings(BaseSettings):
     history_keep: int = Field(default=24, ge=1)
     done_keep_hours: int = Field(default=72, ge=1)
 
+    # GFS retention for sender-side snapshot baselines (state/snapshots/*.jsonl).
+    # Each tier independently keeps the newest snapshot in each non-empty
+    # bucket within its wall-clock window from now. Final keep set is the
+    # union across tiers; a single snapshot can satisfy multiple tiers.
+    # Months are real calendar months, not 30-day windows.
+    snapshot_retention_hours: int = Field(default=0, ge=0)
+    snapshot_retention_days: int = Field(default=3, ge=0)
+    snapshot_retention_months: int = Field(default=0, ge=0)
+
     artifactory_uid: int = 1030
     artifactory_gid: int = 1030
 
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _validate_snapshot_retention(self) -> "Settings":
+        total = (
+            self.snapshot_retention_hours
+            + self.snapshot_retention_days
+            + self.snapshot_retention_months
+        )
+        if total <= 0:
+            raise ValueError(
+                "at least one of snapshot_retention_hours, "
+                "snapshot_retention_days, snapshot_retention_months must be > 0"
+            )
+        return self
 
 
 def load(config_path: Path | None = None) -> Settings:
