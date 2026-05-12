@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import shutil
+import time
+from pathlib import Path
+
+from . import archive, filestore, log, state
+from .artifactory_client import ArtifactoryClient
+from .config import Settings
+
+logger = log.get("artifactory.receiver")
+
+
+def run(settings: Settings) -> int:
+    state_dir = settings.state_dir
+    processed_path = state_dir / "processed.jsonl"
+    lock_path = state_dir / "receiver.lock"
+    done_dir = settings.spool_dir / ".done"
+
+    for p in (state_dir, settings.spool_dir, done_dir):
+        p.mkdir(parents=True, exist_ok=True)
+
+    try:
+        filestore.probe(
+            settings.filestore_root,
+            settings.artifactory_uid,
+            settings.artifactory_gid,
+        )
+    except OSError as exc:
+        logger.error("receiver.filestore_probe_failed", error=str(exc))
+        return 2
+
+    try:
+        with state.file_lock(lock_path):
+            return _loop(
+                settings,
+                processed_path=processed_path,
+                done_dir=done_dir,
+            )
+    except RuntimeError as exc:
+        logger.error("receiver.lock_held", error=str(exc))
+        return 1
+
+
+def _loop(
+    settings: Settings,
+    *,
+    processed_path: Path,
+    done_dir: Path,
+) -> int:
+    client = ArtifactoryClient(
+        settings.artifactory_url,
+        settings.artifactory_token,
+        username=settings.artifactory_username,
+        password=settings.artifactory_password,
+    )
+    try:
+        while True:
+            try:
+                _cycle(
+                    settings,
+                    client=client,
+                    processed_path=processed_path,
+                    done_dir=done_dir,
+                )
+            except Exception:
+                logger.exception("receiver.cycle_failed")
+            time.sleep(settings.cycle_seconds)
+    finally:
+        client.close()
+
+
+def _cycle(
+    settings: Settings,
+    *,
+    client: ArtifactoryClient,
+    processed_path: Path,
+    done_dir: Path,
+) -> None:
+    if not client.ping():
+        logger.warning("receiver.ping_not_ok")
+        return
+
+    processed = _load_processed(processed_path)
+    _prune_done(done_dir, settings.done_keep_hours)
+
+    archives = sorted(settings.spool_dir.glob("*.tar.zst"))
+    if not archives:
+        return
+
+    for archive_path in archives:
+        cycle_id = archive_path.name.removesuffix(".tar.zst")
+        if cycle_id in processed:
+            continue
+
+        try:
+            _process_one(
+                settings,
+                client=client,
+                archive_path=archive_path,
+                processed=processed,
+                processed_path=processed_path,
+                done_dir=done_dir,
+            )
+        except Exception:
+            logger.exception("receiver.archive_failed", cycle_id=cycle_id)
+
+
+def _process_one(
+    settings: Settings,
+    *,
+    client: ArtifactoryClient,
+    archive_path: Path,
+    processed: set[str],
+    processed_path: Path,
+    done_dir: Path,
+) -> None:
+    cycle_id = archive_path.name.removesuffix(".tar.zst")
+    # Extract under the state PVC, not the artifactory data dir;
+    # /api/import/repositories rejects paths under /var/opt/jfrog/artifactory/
+    # the same way /api/import/system does. The state PVC is mounted in
+    # both the airlift and artifactory containers, so the artifactory
+    # process can read what we write here.
+    work_dir = settings.state_dir / "import" / cycle_id
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+
+    logger.info("receiver.extract_start", cycle_id=cycle_id, path=str(archive_path))
+    manifest = archive.extract(archive_path, work_dir)
+
+    if manifest.cycle_id != cycle_id:
+        logger.warning(
+            "receiver.cycle_id_mismatch",
+            file_cycle_id=cycle_id,
+            manifest_cycle_id=manifest.cycle_id,
+        )
+        cycle_id = manifest.cycle_id
+
+    prev = manifest.prev_cycle_id
+    if prev is not None and prev not in processed:
+        logger.warning(
+            "receiver.gap_detected",
+            cycle_id=cycle_id,
+            prev_cycle_id=prev,
+            note="processing anyway; receiver is add-only and idempotent",
+        )
+
+    blobs_root = work_dir / archive.BLOBS_PREFIX
+    written = 0
+    skipped = 0
+    if blobs_root.is_dir():
+        for two in sorted(blobs_root.iterdir()):
+            if not two.is_dir():
+                continue
+            for blob_file in sorted(two.iterdir()):
+                if not blob_file.is_file():
+                    continue
+                sha1 = blob_file.name
+                created = filestore.write_blob(
+                    blob_file,
+                    settings.filestore_root,
+                    sha1,
+                    uid=settings.artifactory_uid,
+                    gid=settings.artifactory_gid,
+                )
+                if created:
+                    written += 1
+                else:
+                    skipped += 1
+
+    logger.info(
+        "receiver.blobs_written",
+        cycle_id=cycle_id,
+        written=written,
+        skipped=skipped,
+    )
+
+    metadata_root = work_dir / archive.METADATA_PREFIX / "repositories"
+    failures: list[str] = []
+    response_text = ""
+    if metadata_root.is_dir():
+        try:
+            response_text = client.import_repositories(metadata_root)
+        except Exception as exc:
+            logger.exception("receiver.import_failed", path=str(metadata_root))
+            failures.append(f"import_repositories: {exc}")
+        else:
+            # The endpoint returns 200 even when individual repos fail.
+            # Per-repo failures show up as lines like:
+            #   "500 : No directory for repository <repo> found at <path>"
+            # System repos that have no exported content (e.g.
+            # artifactory-build-info, jfrog-usage-logs) commonly hit
+            # this; they're benign for our use case but worth recording.
+            for line in response_text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("500 :", "400 :", "404 :", "Error")):
+                    failures.append(stripped)
+            if failures:
+                logger.warning(
+                    "receiver.import_partial",
+                    cycle_id=cycle_id,
+                    failures=len(failures),
+                )
+
+    status = "ok" if not failures else "partial"
+    state.append_jsonl(
+        processed_path,
+        {
+            "cycle_id": cycle_id,
+            "status": status,
+            "blob_count": manifest.blob_count,
+            "total_bytes": manifest.total_bytes,
+            "repos": manifest.repos,
+            "failures": failures,
+            "processed_at": int(time.time()),
+        },
+    )
+    processed.add(cycle_id)
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+    done_target = done_dir / archive_path.name
+    archive_path.replace(done_target)
+    logger.info(
+        "receiver.cycle_done",
+        cycle_id=cycle_id,
+        status=status,
+        moved_to=str(done_target),
+    )
+
+
+def _load_processed(path: Path) -> set[str]:
+    seen: set[str] = set()
+    for entry in state.read_jsonl(path):
+        cid = entry.get("cycle_id")
+        if isinstance(cid, str):
+            seen.add(cid)
+    return seen
+
+
+def _prune_done(done_dir: Path, hours: int) -> None:
+    if hours <= 0 or not done_dir.is_dir():
+        return
+    cutoff = time.time() - hours * 3600
+    for p in done_dir.iterdir():
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            continue

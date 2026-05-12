@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "airlift.spoolPvcName" . }}
+  labels:
+    {{- include "airlift.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.spool.size | quote }}
+  {{- with .Values.spool.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}

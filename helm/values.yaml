@@ -1,0 +1,54 @@
+# artifactory-airlift Helm chart
+#
+# This chart deploys the supporting Kubernetes resources for the airlift
+# sidecar: a ConfigMap, a Secret, and two PVCs (state + spool). The
+# sidecar container itself is added to the artifactory pod via the
+# jfrog/artifactory chart's `customSidecarContainers` field. See
+# NOTES.txt for the snippet to paste into per-instance Helm values.
+
+mode: sender  # or "receiver"
+instanceName: ""
+
+image:
+  # Push the image you built from this repo's Dockerfile here and set
+  # the repository + tag. Examples:
+  #   repository: ghcr.io/<owner>/artifactory-airlift
+  #   repository: registry.example.com/artifactory-airlift
+  repository: ""
+  tag: ""
+
+# Connection to the local Artifactory (talks over loopback as a sidecar).
+# Provide EITHER a bearer access token, OR a username+password pair for
+# basic auth. Basic auth is the only reliable way today to bootstrap
+# against admin endpoints like /api/export/system unless you've minted
+# a proper applied-permissions/admin scoped token via the Access API.
+artifactory:
+  url: http://localhost:8081/artifactory
+  # Plaintext only for bootstrap / dev. In production this should be
+  # populated via an ExternalSecret / SealedSecret and `existingSecret`.
+  token: ""
+  username: ""
+  password: ""
+  existingSecret: ""   # if set, must contain keys: token, username, password
+
+# Cycle behavior.
+cycleSeconds: 300
+historyKeep: 24
+doneKeepHours: 72
+logLevel: INFO
+
+# Storage.
+state:
+  size: 1Gi
+  storageClass: ""  # empty -> cluster default (local-path)
+spool:
+  size: 20Gi
+  storageClass: ""
+
+# Filesystem paths inside the artifactory pod (must match the jfrog chart).
+paths:
+  filestoreRoot: /var/opt/jfrog/artifactory/data/artifactory/filestore
+  artifactoryTmp: /var/opt/jfrog/artifactory/data/artifactory/tmp
+  stateMount: /var/airlift/state
+  spoolMount: /var/airlift/spool
+  configMount: /etc/airlift

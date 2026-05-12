@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "airlift.configMapName" . }}
+  labels:
+    {{- include "airlift.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    mode: {{ .Values.mode | quote }}
+    instance_name: {{ .Values.instanceName | quote }}
+    artifactory_url: {{ .Values.artifactory.url | quote }}
+    filestore_root: {{ .Values.paths.filestoreRoot | quote }}
+    artifactory_tmp: {{ .Values.paths.artifactoryTmp | quote }}
+    state_dir: {{ .Values.paths.stateMount | quote }}
+    spool_dir: {{ .Values.paths.spoolMount | quote }}
+    cycle_seconds: {{ .Values.cycleSeconds }}
+    history_keep: {{ .Values.historyKeep }}
+    done_keep_hours: {{ .Values.doneKeepHours }}
+    log_level: {{ .Values.logLevel | quote }}

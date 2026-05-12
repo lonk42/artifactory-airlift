@@ -1,0 +1,64 @@
+artifactory-airlift chart installed.
+
+This chart only ships supporting resources (ConfigMap, Secret, PVCs).
+The sidecar container itself is added to the artifactory pod via the
+jfrog/artifactory chart's `customSidecarContainers` field. Paste the
+following block into the jfrog/artifactory Helm values for this
+namespace (under `artifactory.artifactory`):
+
+  artifactory:
+    artifactory:
+      customVolumes: |
+        - name: airlift-state
+          persistentVolumeClaim:
+            claimName: {{ include "airlift.statePvcName" . }}
+        - name: airlift-spool
+          persistentVolumeClaim:
+            claimName: {{ include "airlift.spoolPvcName" . }}
+        - name: airlift-config
+          configMap:
+            name: {{ include "airlift.configMapName" . }}
+      customVolumeMounts: |
+        - name: airlift-state
+          mountPath: {{ .Values.paths.stateMount }}
+        - name: airlift-spool
+          mountPath: {{ .Values.paths.spoolMount }}
+        - name: airlift-config
+          mountPath: {{ .Values.paths.configMount }}
+      customSidecarContainers: |
+        - name: airlift
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          env:
+            - name: AIRLIFT_MODE
+              value: {{ .Values.mode | quote }}
+            - name: AIRLIFT_ARTIFACTORY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "airlift.secretName" . }}
+                  key: token
+            - name: AIRLIFT_ARTIFACTORY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "airlift.secretName" . }}
+                  key: username
+            - name: AIRLIFT_ARTIFACTORY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "airlift.secretName" . }}
+                  key: password
+          volumeMounts:
+            - name: airlift-state
+              mountPath: {{ .Values.paths.stateMount }}
+            - name: airlift-spool
+              mountPath: {{ .Values.paths.spoolMount }}
+            - name: airlift-config
+              mountPath: {{ .Values.paths.configMount }}
+            - name: artifactory-volume
+              mountPath: /var/opt/jfrog/artifactory
+          securityContext:
+            runAsUser: 1030
+            runAsGroup: 1030
+
+Install this chart twice (once per Artifactory instance) with
+`mode: sender` on the source side and `mode: receiver` on the
+destination side.

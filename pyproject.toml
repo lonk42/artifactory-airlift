@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "artifactory-airlift"
+version = "0.3.0"
+description = "One-way air-gapped sync between two JFrog Artifactory instances"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "tenacity>=8.2",
+    "structlog>=24.1",
+    "pyyaml>=6.0",
+    "zstandard>=0.22",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+artifactory-airlift = "artifactory_airlift.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/artifactory_airlift"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

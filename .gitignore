@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+
+# Local development scratch
+*.swp
+*.swo
+tmp/
+
+# Test artifacts sometimes end up in the working tree during local debugging
+*.tar.zst
+*.tar.zst.partial
