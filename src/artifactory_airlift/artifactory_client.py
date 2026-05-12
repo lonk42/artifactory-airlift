@@ -119,6 +119,22 @@ class ArtifactoryClient:
         logger.info("import.repositories_done", path=str(path))
         return r.text
 
+    @retry(**_RETRY)
+    def delete_artifact(self, repo_key: str, repo_path: str) -> int:
+        """Delete a single artifact. Returns HTTP status.
+
+        A 404 is treated as success (idempotent desired-state-already-achieved)
+        and surfaced as the status code rather than raised, so the tenacity
+        retry doesn't fire on a known-missing artifact. Any other non-2xx
+        still raises and retries per ``_RETRY``.
+        """
+        url = f"{self.base_url}/{repo_key}/{repo_path.lstrip('/')}"
+        r = self._http.delete(url)
+        if r.status_code == 404:
+            return 404
+        r.raise_for_status()
+        return r.status_code
+
     def deploy_by_checksum(
         self, repo_key: str, repo_path: str, sha1: str, size: int
     ) -> None:

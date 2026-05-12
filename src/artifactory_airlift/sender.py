@@ -108,14 +108,25 @@ def _cycle(
     from . import diff
 
     new_entries = list(diff.added(prev_snapshot, snapshot_path))
+
+    removed_entries: list = []
+    if settings.propagate_deletes:
+        if prev_snapshot is None:
+            # Cold start: a missing baseline cannot distinguish "deleted on A"
+            # from "never seen", so we never emit removals on the first cycle.
+            logger.info("sender.removals_skipped_cold_start", cycle_id=cycle_id)
+        else:
+            removed_entries = list(diff.removed(prev_snapshot, snapshot_path))
+
     logger.info(
         "sender.diff_computed",
         cycle_id=cycle_id,
         prev_cycle_id=prev_cycle_id,
         added=len(new_entries),
+        removed=len(removed_entries),
     )
 
-    if not new_entries and prev_cycle_id is not None:
+    if not new_entries and not removed_entries and prev_cycle_id is not None:
         # No new data; don't emit an empty archive, but advance the cursor so
         # the next cycle's diff baseline rolls forward.
         _advance_cursor(cursor_path, cycle_id)
@@ -135,6 +146,7 @@ def _cycle(
         export_root=export_contents,
         entries=new_entries,
         filestore_root=settings.filestore_root,
+        removed=removed_entries,
     )
     logger.info("sender.archive_finalized", path=str(archive_path))
 

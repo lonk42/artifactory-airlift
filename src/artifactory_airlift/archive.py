@@ -18,7 +18,7 @@ from .export_unpacker import ArtifactEntry
 
 logger = log.get("artifactory.archive")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MANIFEST_NAME = "manifest.json"
 BLOBS_PREFIX = "blobs"
 METADATA_PREFIX = "metadata"
@@ -35,6 +35,7 @@ class Manifest:
     blob_count: int
     total_bytes: int
     entries: list[dict] = field(default_factory=list)
+    removed: list[dict] = field(default_factory=list)
 
     def to_json(self) -> bytes:
         return json.dumps(
@@ -48,6 +49,7 @@ class Manifest:
                 "blob_count": self.blob_count,
                 "total_bytes": self.total_bytes,
                 "entries": self.entries,
+                "removed": self.removed,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -66,6 +68,7 @@ class Manifest:
             blob_count=int(d.get("blob_count", 0)),
             total_bytes=int(d.get("total_bytes", 0)),
             entries=list(d.get("entries", [])),
+            removed=list(d.get("removed", [])),
         )
 
 
@@ -82,6 +85,7 @@ def build(
     export_root: Path,
     entries: Iterable[ArtifactEntry],
     filestore_root: Path,
+    removed: Iterable[ArtifactEntry] = (),
     zstd_level: int = 10,
 ) -> Path:
     """Build a per-cycle archive atomically in ``spool_dir``.
@@ -96,7 +100,8 @@ def build(
     staging.mkdir(parents=True)
 
     entries_list = list(entries)
-    repos = sorted({e.repo_key for e in entries_list})
+    removed_list = list(removed)
+    repos = sorted({e.repo_key for e in entries_list} | {e.repo_key for e in removed_list})
     total_bytes = 0
 
     final_name = f"{cycle_id}.tar.zst"
@@ -157,6 +162,15 @@ def build(
                         "size": e.size,
                     }
                     for e in entries_list
+                ],
+                removed=[
+                    {
+                        "sha1": e.sha1,
+                        "repo": e.repo_key,
+                        "path": e.repo_path,
+                        "size": e.size,
+                    }
+                    for e in removed_list
                 ],
             )
             manifest_bytes = manifest.to_json()

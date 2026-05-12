@@ -202,6 +202,42 @@ def _process_one(
                     failures=len(failures),
                 )
 
+    # Apply removals after imports: if a sha1 appears in both entries[] and
+    # removed[] under different (repo, path)s, the import re-creates the new
+    # link before we drop the old one.
+    delete_failures: list[str] = []
+    deleted = 0
+    for r in manifest.removed:
+        repo_key = r.get("repo", "")
+        repo_path = r.get("path", "")
+        try:
+            status_code = client.delete_artifact(repo_key, repo_path)
+        except Exception as exc:
+            logger.warning(
+                "receiver.delete_failed",
+                repo=repo_key,
+                path=repo_path,
+                error=str(exc),
+            )
+            delete_failures.append(f"{repo_key}/{repo_path}: {exc}")
+            continue
+        if status_code == 404:
+            logger.warning(
+                "receiver.delete_missing",
+                repo=repo_key,
+                path=repo_path,
+            )
+            delete_failures.append(f"{repo_key}/{repo_path}: 404")
+        deleted += 1
+
+    if manifest.removed:
+        logger.info(
+            "receiver.deletes_applied",
+            cycle_id=cycle_id,
+            deleted=deleted,
+            failed=len(delete_failures),
+        )
+
     status = "ok" if not failures else "partial"
     state.append_jsonl(
         processed_path,
@@ -212,6 +248,8 @@ def _process_one(
             "total_bytes": manifest.total_bytes,
             "repos": manifest.repos,
             "failures": failures,
+            "deleted_count": deleted,
+            "delete_failures": delete_failures,
             "processed_at": int(time.time()),
         },
     )

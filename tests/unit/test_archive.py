@@ -59,6 +59,62 @@ def test_build_and_extract_roundtrip(tmp_path: Path) -> None:
     ).is_file()
 
 
+def test_build_and_extract_with_removed(tmp_path: Path) -> None:
+    sha1 = "0123456789abcdef" + "0" * 24
+    export_root = _make_export(tmp_path, "r1", "blob.bin", sha1)
+
+    filestore_root = tmp_path / "filestore"
+    blob = filestore_root / sha1[:2] / sha1
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"hello world")
+
+    spool = tmp_path / "spool"
+    cycle_id = archive.new_cycle_id()
+    entry = ArtifactEntry(repo_key="r1", repo_path="blob.bin", sha1=sha1, size=11)
+    gone_sha = "f" * 40
+    gone = ArtifactEntry(repo_key="r2", repo_path="old.bin", sha1=gone_sha, size=7)
+
+    archive_path = archive.build(
+        spool_dir=spool,
+        cycle_id=cycle_id,
+        prev_cycle_id="prev-xyz",
+        source_instance="art-a",
+        export_root=export_root,
+        entries=[entry],
+        filestore_root=filestore_root,
+        removed=[gone],
+    )
+
+    manifest = archive.read_manifest(archive_path)
+    assert manifest.removed == [
+        {"sha1": gone_sha, "repo": "r2", "path": "old.bin", "size": 7}
+    ]
+    # Removed blob is *not* shipped in the tar; only the metadata record.
+    assert manifest.blob_count == 1
+    # Removed repo is still represented in the repos list.
+    assert manifest.repos == ["r1", "r2"]
+
+
+def test_manifest_backcompat_no_removed_field() -> None:
+    """Schema-v1 manifests (no `removed` field) must still load."""
+    import json
+
+    v1 = {
+        "schema": 1,
+        "cycle_id": "old-cycle",
+        "prev_cycle_id": None,
+        "created_at": 1700000000,
+        "source_instance": "art-a",
+        "repos": ["r1"],
+        "blob_count": 0,
+        "total_bytes": 0,
+        "entries": [],
+    }
+    m = archive.Manifest.from_bytes(json.dumps(v1).encode("utf-8"))
+    assert m.removed == []
+    assert m.schema == 1
+
+
 def test_partial_archive_invisible_to_glob(tmp_path: Path) -> None:
     """Receiver scans *.tar.zst; partial files must not match."""
     spool = tmp_path / "spool"

@@ -25,9 +25,9 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 to match th
 
 1. `POST /api/export/system` with `excludeContent=true,includeMetadata=true,createArchive=false`. Artifactory writes the export tree to a path on the state PVC, nested inside a timestamped subdirectory.
 2. Walk the export tree and parse every `*.artifactory-metadata/artifactory-file.xml`, extracting `(repo_key, repo_path, sha1, size)`. Write a sorted JSONL snapshot at `state/snapshots/<cycle_id>.jsonl`.
-3. Two-pointer set-diff against the previous snapshot to compute new `(sha1, repo, path)` triples.
+3. Two-pointer set-diff against the previous snapshot to compute new `(sha1, repo, path)` triples; when `propagate_deletes` is on (default), also compute removed triples (entries in the previous snapshot that are absent from the current one). Removals are skipped on the first cycle after a clean state, since a missing baseline cannot distinguish "deleted on source" from "never seen".
 4. For each new sha1, locate the raw blob at `<FILESTORE_ROOT>/<sha1[:2]>/<sha1>` (airlift mounts the filestore PVC read-only on the sender side).
-5. Build `<cycle_id>.tar.zst` containing `manifest.json`, the full `metadata/` subtree from the export, and `blobs/<aa>/<sha1>` entries. The archive is finalised atomically (`.partial` → `os.rename`).
+5. Build `<cycle_id>.tar.zst` containing `manifest.json` (with `entries[]` for additions and `removed[]` for deletions), the full `metadata/` subtree from the export, and `blobs/<aa>/<sha1>` entries for each added sha1. Removed entries ship as metadata records only; their blobs are never re-included, because the same sha1 may still be in use elsewhere. The archive is finalised atomically (`.partial` → `os.rename`).
 6. Prune `state/snapshots/` under a tiered GFS retention policy (hours/days/months); prune `state/exports/` past the configured history depth.
 
 ### What the receiver does each cycle
@@ -37,11 +37,12 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 to match th
 3. Extract the next archive to `state/import/<cycle_id>/` (must be on the state PVC, not under the artifactory data dir; the import API rejects paths under `/var/opt/jfrog/artifactory/...`).
 4. Stream each blob from `blobs/<aa>/<sha1>` into `<FILESTORE_ROOT>/<aa>/<sha1>.tmp-<pid>`, `fsync`, `rename`, `chown 1030:1030`, `chmod 0640`. Existing sha1s are skipped (filestore is content-addressed and idempotent).
 5. `POST /api/import/repositories?path=<extract_dir>/metadata/repositories&verbose=1`. Artifactory returns 200 even when individual repos fail; the receiver scans the verbose response body for `500 :`, `400 :`, `404 :`, and `Error` lines and records them as per-repo failures.
-6. Append `{cycle_id, status, blob_count, total_bytes, repos, failures, processed_at}` to `state/processed.jsonl` and move the archive to `spool/.done/`.
+6. For each record in the manifest's `removed[]`, issue `DELETE /<repo>/<path>` against the destination. A 404 is treated as success (the artifact is already gone, which is the desired state) but recorded in `delete_failures[]`. Imports run before deletions so a sha1 that both moved away from one path and reappeared at another in the same cycle survives.
+7. Append `{cycle_id, status, blob_count, total_bytes, repos, failures, deleted_count, delete_failures, processed_at}` to `state/processed.jsonl` and move the archive to `spool/.done/`.
 
 ### Failure semantics
 
-The receiver is add-only and idempotent. Replaying an archive is a no-op because (a) sha1s already in the filestore are skipped and (b) the cycle_id is in `processed.jsonl`. A missing predecessor (`prev_cycle_id` not yet processed) is logged but does not block; wider future diffs converge state. A partial import (some repos failed) records `status: "partial"` in the ledger and leaves the archive in `.done/` for forensic replay.
+Adding artifacts is idempotent: sha1s already in the filestore are skipped, the cycle_id is recorded in `processed.jsonl`, and a missing predecessor (`prev_cycle_id` not yet processed) is logged but does not block; wider future diffs converge state. Deleting artifacts is also idempotent in the desired-state sense, since a missing target returns 404 and the receiver counts that as success. A partial import (some repos failed) records `status: "partial"` in the ledger and leaves the archive in `.done/` for forensic replay; delete failures land in a separate `delete_failures[]` field and do **not** flip the cycle to `partial`, because the desired post-state on the destination is "this artifact is gone" and a 404 already satisfies it.
 
 ## Repo layout
 
@@ -172,6 +173,7 @@ Note that `state/exports/<cycle_id>/` (the raw Artifactory export trees) is reta
 | `artifactory_username`  | `AIRLIFT_ARTIFACTORY_USERNAME`   | `""`                                                     | Admin username for basic auth. When both username and password are set, basic auth takes precedence over `artifactory_token`.|
 | `artifactory_password`  | `AIRLIFT_ARTIFACTORY_PASSWORD`   | `""`                                                     | Admin password paired with `artifactory_username`. Inject via a Secret; the chart writes this into `artifactory-airlift-token`.|
 | `cycle_seconds`         | `AIRLIFT_CYCLE_SECONDS`          | `300`                                                    | Seconds between cycles. Sender: time between exports/diffs. Receiver: poll interval for new archives in the spool dir.       |
+| `propagate_deletes`     | `AIRLIFT_PROPAGATE_DELETES`      | `true`                                                   | Sender-only. When true, each cycle's manifest includes a `removed[]` list of artifacts present in the previous snapshot but absent from the current one; the receiver issues `DELETE` calls to converge. Cold-start cycles (no previous snapshot) skip removal emission. Set false to fall back to additive-only behaviour. |
 | `history_keep`          | `AIRLIFT_HISTORY_KEEP`           | `24`                                                     | Sender-only. Number of raw export trees to retain under `state/exports/` before pruning the oldest. Snapshot baselines use the GFS retention keys below.|
 | `done_keep_hours`       | `AIRLIFT_DONE_KEEP_HOURS`        | `72`                                                     | Receiver-only. How long to retain processed archives under `spool/.done/` before deleting them. Set `0` to keep forever.     |
 | `snapshot_retention_hours`  | `AIRLIFT_SNAPSHOT_RETENTION_HOURS`  | `0` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per hour-bucket for the last N hour-buckets (wall clock).        |

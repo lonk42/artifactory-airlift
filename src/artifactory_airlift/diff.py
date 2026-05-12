@@ -68,3 +68,37 @@ def added(previous: Path | None, current: Path) -> Iterator[ArtifactEntry]:
         else:
             yield cur[1]
             cur = next(cur_it, None)
+
+
+def removed(previous: Path | None, current: Path) -> Iterator[ArtifactEntry]:
+    """Yield entries present in ``previous`` but absent from ``current``.
+
+    Identity is (sha1, repo, path), matching ``added``. The same sha1
+    disappearing from one (repo, path) while remaining at another is
+    reported as removed for the old location, since the receiver must
+    drop the link there.
+
+    Returns nothing when ``previous`` is None or missing: with no
+    baseline we cannot distinguish a real deletion from a cold start.
+    """
+    if previous is None or not previous.exists():
+        return
+
+    prev_it = _iter_sorted_keys(previous)
+    cur_it = _iter_sorted_keys(current)
+    prev = next(prev_it, None)
+    cur = next(cur_it, None)
+
+    while prev is not None:
+        if cur is None:
+            yield prev[1]
+            prev = next(prev_it, None)
+            continue
+        if prev[0] < cur[0]:
+            yield prev[1]
+            prev = next(prev_it, None)
+        elif prev[0] == cur[0]:
+            prev = next(prev_it, None)
+            cur = next(cur_it, None)
+        else:
+            cur = next(cur_it, None)

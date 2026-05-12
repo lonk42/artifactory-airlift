@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     snapshot_retention_days: int = Field(default=3, ge=0)
     snapshot_retention_months: int = Field(default=0, ge=0)
 
+    propagate_deletes: bool = True
+
     artifactory_uid: int = 1030
     artifactory_gid: int = 1030
 
