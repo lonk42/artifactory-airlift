@@ -1,9 +1,9 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Mode = Literal["sender", "receiver"]
 
@@ -43,6 +43,46 @@ class Settings(BaseSettings):
     snapshot_retention_months: int = Field(default=0, ge=0)
 
     propagate_deletes: bool = True
+
+    # Repos to drop before they enter the snapshot. The system export
+    # writes every repo on the source, including JFrog-internal ones that
+    # either fail to import on the destination or are platform-managed
+    # and should be left alone. Two filters apply in parallel:
+    #   - excluded_repos: literal repo-key match, for system repos whose
+    #     packageType is Generic (e.g. jfrog-usage-logs) and so cannot be
+    #     caught structurally.
+    #   - excluded_package_types: packageType match resolved against
+    #     /api/repositories at cycle time; catches any BuildInfo repo
+    #     regardless of name (artifactory-build-info, airlift-build-info,
+    #     team-foo-build-info, ...).
+    # Operators can extend either via env (comma-separated):
+    #   AIRLIFT_EXCLUDED_REPOS=foo,bar
+    #   AIRLIFT_EXCLUDED_PACKAGE_TYPES=BuildInfo,...
+    excluded_repos: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "artifactory-build-info",
+            "jfrog-usage-logs",
+            "auto-trashcan",
+            "artifactory-pipe-info",
+            "artifactory-edge-uploads",
+            "jfrog-support-bundle",
+            "release-bundles",
+            "release-bundles-v2",
+        ]
+    )
+    excluded_package_types: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["BuildInfo"]
+    )
+
+    @field_validator("excluded_repos", "excluded_package_types", mode="before")
+    @classmethod
+    def _split_csv(cls, v):
+        # Env vars arrive as raw strings; accept comma-separated values
+        # for operator ergonomics (AIRLIFT_EXCLUDED_REPOS=foo,bar).
+        # YAML / Python list inputs pass through unchanged.
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
 
     artifactory_uid: int = 1030
     artifactory_gid: int = 1030

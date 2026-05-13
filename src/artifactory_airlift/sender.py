@@ -89,8 +89,18 @@ def _cycle(
     # and friends inside it. Find that one subdir and treat it as the
     # actual export root.
     export_contents = _locate_export_contents(export_root)
+    excluded = _resolve_excluded_repos(client, settings)
+    if excluded:
+        logger.info(
+            "sender.repos_excluded",
+            cycle_id=cycle_id,
+            repos=sorted(excluded),
+            count=len(excluded),
+        )
     snapshot_path = snapshots_dir / f"{cycle_id}.jsonl"
-    count = export_unpacker.write_snapshot(export_contents, snapshot_path)
+    count = export_unpacker.write_snapshot(
+        export_contents, snapshot_path, excluded_repos=excluded
+    )
     snapshot_repo_counts = _count_snapshot_repos(snapshot_path)
     logger.info(
         "sender.snapshot_written",
@@ -258,6 +268,33 @@ def _prune_history(
     if len(entries) > settings.history_keep:
         for p in entries[: len(entries) - settings.history_keep]:
             shutil.rmtree(p, ignore_errors=True)
+
+
+def _resolve_excluded_repos(
+    client: ArtifactoryClient, settings: Settings
+) -> set[str]:
+    """Build the set of repo keys to drop from this cycle's snapshot.
+
+    Combines the literal-name denylist with any repo whose packageType
+    matches the configured denylist. If /api/repositories fails we fall
+    back to the name-only set rather than aborting the cycle: the name
+    list alone catches the common JFrog system repos.
+    """
+    excluded = set(settings.excluded_repos)
+    type_deny = set(settings.excluded_package_types)
+    if not type_deny:
+        return excluded
+    try:
+        repos = client.list_repositories()
+    except Exception as exc:
+        logger.warning("sender.list_repositories_failed", error=str(exc))
+        return excluded
+    for r in repos:
+        if r.get("packageType") in type_deny:
+            key = r.get("key")
+            if key:
+                excluded.add(key)
+    return excluded
 
 
 def _count_snapshot_repos(snapshot_path: Path) -> Counter:

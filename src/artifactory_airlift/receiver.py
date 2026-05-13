@@ -160,7 +160,7 @@ def _process_one(
             "receiver.gap_detected",
             cycle_id=cycle_id,
             prev_cycle_id=prev,
-            note="processing anyway; receiver is add-only and idempotent",
+            note="processing anyway",
         )
 
     blobs_root = work_dir / archive.BLOBS_PREFIX

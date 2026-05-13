@@ -54,6 +54,39 @@ def test_iter_artifacts_real_artifactory_file_xml(tmp_path: Path) -> None:
     ]
 
 
+def test_iter_artifacts_excluded_repos_skipped(tmp_path: Path) -> None:
+    root = tmp_path / "export"
+    _meta(
+        root / "repositories" / "real-repo" / "blob.bin.artifactory-metadata",
+        "a" * 40,
+        100,
+    )
+    _meta(
+        root
+        / "repositories"
+        / "artifactory-build-info"
+        / "build1.json.artifactory-metadata",
+        "b" * 40,
+        50,
+    )
+    _meta(
+        root / "repositories" / "jfrog-usage-logs" / "log.txt.artifactory-metadata",
+        "c" * 40,
+        10,
+    )
+
+    excluded = {"artifactory-build-info", "jfrog-usage-logs"}
+    entries = list(export_unpacker.iter_artifacts(root, excluded_repos=excluded))
+    assert [e.repo_key for e in entries] == ["real-repo"]
+
+    # write_snapshot must forward the filter end-to-end.
+    snap = tmp_path / "snap.jsonl"
+    count = export_unpacker.write_snapshot(root, snap, excluded_repos=excluded)
+    assert count == 1
+    assert "real-repo" in snap.read_text()
+    assert "artifactory-build-info" not in snap.read_text()
+
+
 def test_write_snapshot_sorted_by_sha1(tmp_path: Path) -> None:
     root = tmp_path / "export"
     _meta(root / "repositories" / "r" / "z.bin.artifactory-metadata", "b" * 40, 1)

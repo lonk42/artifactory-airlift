@@ -36,6 +36,8 @@ _EVENT_TEMPLATES: dict[str, str] = {
 
     # Sender lifecycle.
     "sender.cycle_start": "Cycle starting; running Artifactory system export.",
+    "sender.repos_excluded": "Excluding {count} repo(s) from sync: {repos}",
+    "sender.list_repositories_failed": "Could not list repositories for packageType filter ({error}); falling back to name-only exclusion.",
     "sender.snapshot_written": "Snapshot written: {count} artifacts across {repo_count} repos.",
     "sender.per_repo_counts": "Per-repo counts on source: {summary}",
     "sender.previous_snapshot_missing": "Previous snapshot missing (prev={prev_cycle_id}); treating this as a cold start.",
