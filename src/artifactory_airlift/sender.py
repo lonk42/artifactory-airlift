@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import archive, export_unpacker, log, state
@@ -90,7 +91,20 @@ def _cycle(
     export_contents = _locate_export_contents(export_root)
     snapshot_path = snapshots_dir / f"{cycle_id}.jsonl"
     count = export_unpacker.write_snapshot(export_contents, snapshot_path)
-    logger.info("sender.snapshot_written", cycle_id=cycle_id, count=count)
+    snapshot_repo_counts = _count_snapshot_repos(snapshot_path)
+    logger.info(
+        "sender.snapshot_written",
+        cycle_id=cycle_id,
+        count=count,
+        repo_count=len(snapshot_repo_counts),
+    )
+    if snapshot_repo_counts:
+        logger.info(
+            "sender.per_repo_counts",
+            cycle_id=cycle_id,
+            repos=dict(snapshot_repo_counts),
+            summary=log._fmt_counter_dict(snapshot_repo_counts),
+        )
 
     cursor = state.read_json(cursor_path, default={}) or {}
     prev_cycle_id = cursor.get("last_cycle_id") if isinstance(cursor, dict) else None
@@ -126,6 +140,30 @@ def _cycle(
         removed=len(removed_entries),
     )
 
+    if new_entries or removed_entries:
+        added_per_repo = Counter(e.repo_key for e in new_entries)
+        removed_per_repo = Counter(e.repo_key for e in removed_entries)
+        # Combined summary like "airlift-rpm-local=+3, airlift-npm-local=-1".
+        # When both directions touch the same repo the entry shows the net,
+        # e.g. "airlift-foo=+2/-1".
+        repos = sorted(set(added_per_repo) | set(removed_per_repo))
+        summary_parts = []
+        for repo in repos:
+            a, r = added_per_repo.get(repo, 0), removed_per_repo.get(repo, 0)
+            if a and r:
+                summary_parts.append(f"{repo}=+{a}/-{r}")
+            elif a:
+                summary_parts.append(f"{repo}=+{a}")
+            else:
+                summary_parts.append(f"{repo}=-{r}")
+        logger.info(
+            "sender.per_repo_changes",
+            cycle_id=cycle_id,
+            added=dict(added_per_repo),
+            removed=dict(removed_per_repo),
+            summary=", ".join(summary_parts),
+        )
+
     if not new_entries and not removed_entries and prev_cycle_id is not None:
         # No new data; don't emit an empty archive, but advance the cursor so
         # the next cycle's diff baseline rolls forward.
@@ -148,7 +186,20 @@ def _cycle(
         filestore_root=settings.filestore_root,
         removed=removed_entries,
     )
-    logger.info("sender.archive_finalized", path=str(archive_path))
+    archive_size = archive_path.stat().st_size
+    archive_repos = sorted(
+        {e.repo_key for e in new_entries} | {e.repo_key for e in removed_entries}
+    )
+    logger.info(
+        "sender.archive_finalized",
+        cycle_id=cycle_id,
+        path=str(archive_path),
+        size_bytes=archive_size,
+        size_human=log.human_bytes(archive_size),
+        blob_count=len(new_entries),
+        repo_count=len(archive_repos),
+        repos=archive_repos,
+    )
 
     _advance_cursor(cursor_path, cycle_id)
     _prune_history(
@@ -207,3 +258,26 @@ def _prune_history(
     if len(entries) > settings.history_keep:
         for p in entries[: len(entries) - settings.history_keep]:
             shutil.rmtree(p, ignore_errors=True)
+
+
+def _count_snapshot_repos(snapshot_path: Path) -> Counter:
+    """Return a Counter of artifact counts per repo from a JSONL snapshot."""
+    counts: Counter = Counter()
+    try:
+        with snapshot_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Snapshot entries are JSON dicts with keys including "repo".
+                # Cheap parse: extract the repo key without loading json.
+                # Falls back to json on any oddity.
+                try:
+                    import json
+
+                    counts[json.loads(line)["repo"]] += 1
+                except (KeyError, ValueError):
+                    continue
+    except FileNotFoundError:
+        return counts
+    return counts

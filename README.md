@@ -185,7 +185,8 @@ Note that `state/exports/<cycle_id>/` (the raw Artifactory export trees) is reta
 | `spool_dir`             | `AIRLIFT_SPOOL_DIR`              | `/var/airlift/spool`                                     | Where finalised `*.tar.zst` archives land (sender) and where they're picked up from (receiver). Never NFS; tearing on fsync. |
 | `artifactory_uid`       | `AIRLIFT_ARTIFACTORY_UID`        | `1030`                                                   | UID the receiver chowns blobs to when placing them in the filestore. Must match the artifactory process's UID.               |
 | `artifactory_gid`       | `AIRLIFT_ARTIFACTORY_GID`        | `1030`                                                   | GID counterpart of `artifactory_uid`.                                                                                        |
-| `log_level`             | `AIRLIFT_LOG_LEVEL`              | `INFO`                                                   | Structlog level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. JSON logs are written to stdout.                                       |
+| `log_level`             | `AIRLIFT_LOG_LEVEL`              | `INFO`                                                   | Structlog level: `DEBUG`, `INFO`, `WARNING`, `ERROR`.                                                                        |
+| `log_format` (env only) | `AIRLIFT_LOG_FORMAT`             | `console`                                                | `console` emits one human-readable line per event (`YYYY-MM-DD HH:MM:SS LEVEL component cycle=… message [k=v …]`). Set to `json` for the original structlog JSON output. |
 
 ## Troubleshooting the sidecar
 
@@ -248,6 +249,6 @@ kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- rm -f /var
 
 - **Create destination repositories.** They must currently be created manually; this will require additional API permissions and metadata.
 - **Authentication should avoid username/password.** Test bearer auth and find a better pattern.
-- **Logging readability.** Logs are JSON objects; stdout should be more parseable, with JSON relegated to debug logging.
 - **Metadata snapshot de-duplication.** Metadata exports should be ignored if there are no differences, to reduce unnecessary retention.
 - **Hooks for external alerting.** On partial and full failures you are gonna wanna know
+- **Chunk sizing.** A large delta could generate massive exports, more than is reasonable to buffer in a PVC. We need a way to gate the max size of an export and chunk it out into multiple

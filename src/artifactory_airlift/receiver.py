@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import archive, filestore, log, state
@@ -125,8 +126,25 @@ def _process_one(
     if work_dir.exists():
         shutil.rmtree(work_dir)
 
-    logger.info("receiver.extract_start", cycle_id=cycle_id, path=str(archive_path))
+    archive_size = archive_path.stat().st_size
+    logger.info(
+        "receiver.extract_start",
+        cycle_id=cycle_id,
+        path=str(archive_path),
+        size_bytes=archive_size,
+        size_human=log.human_bytes(archive_size),
+    )
     manifest = archive.extract(archive_path, work_dir)
+    logger.info(
+        "receiver.manifest_loaded",
+        cycle_id=cycle_id,
+        blob_count=manifest.blob_count,
+        total_bytes=manifest.total_bytes,
+        total_bytes_human=log.human_bytes(manifest.total_bytes),
+        repo_count=len(manifest.repos),
+        repos=manifest.repos,
+        removed_count=len(manifest.removed),
+    )
 
     if manifest.cycle_id != cycle_id:
         logger.warning(
@@ -175,6 +193,31 @@ def _process_one(
         skipped=skipped,
     )
 
+    # Per-repo summary of what this archive carries, derived from the manifest
+    # entries[]. This is the same data Artifactory will see in the import call,
+    # so a "10 to airlift-rpm-local" line up here matches the import outcome
+    # below.
+    added_per_repo = Counter(e.get("repo", "") for e in manifest.entries)
+    removed_per_repo = Counter(r.get("repo", "") for r in manifest.removed)
+    if added_per_repo or removed_per_repo:
+        repos_seen = sorted(set(added_per_repo) | set(removed_per_repo))
+        parts = []
+        for repo in repos_seen:
+            a, r = added_per_repo.get(repo, 0), removed_per_repo.get(repo, 0)
+            if a and r:
+                parts.append(f"{repo}=+{a}/-{r}")
+            elif a:
+                parts.append(f"{repo}=+{a}")
+            else:
+                parts.append(f"{repo}=-{r}")
+        logger.info(
+            "receiver.per_repo_changes",
+            cycle_id=cycle_id,
+            added=dict(added_per_repo),
+            removed=dict(removed_per_repo),
+            summary=", ".join(parts),
+        )
+
     metadata_root = work_dir / archive.METADATA_PREFIX / "repositories"
     failures: list[str] = []
     response_text = ""
@@ -201,6 +244,18 @@ def _process_one(
                     cycle_id=cycle_id,
                     failures=len(failures),
                 )
+                # Emit one WARN per failure so they grep cleanly and the count
+                # above reconciles with detail lines below it.
+                for i, line in enumerate(failures, 1):
+                    code, _, detail = line.partition(" : ")
+                    logger.warning(
+                        "receiver.import_failure",
+                        cycle_id=cycle_id,
+                        index=i,
+                        total=len(failures),
+                        code=code.strip(),
+                        detail=detail.strip() or line,
+                    )
 
     # Apply removals after imports: if a sha1 appears in both entries[] and
     # removed[] under different (repo, path)s, the import re-creates the new

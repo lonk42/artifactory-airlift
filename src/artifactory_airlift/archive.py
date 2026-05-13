@@ -188,12 +188,17 @@ def build(
 
     os.replace(partial_path, final_path)
     shutil.rmtree(staging, ignore_errors=True)
+    archive_bytes = final_path.stat().st_size
     logger.info(
         "archive.built",
         path=str(final_path),
-        blobs=manifest.blob_count,
-        bytes=manifest.total_bytes,
-        repos=len(repos),
+        blob_count=manifest.blob_count,
+        total_bytes=manifest.total_bytes,
+        total_bytes_human=log.human_bytes(manifest.total_bytes),
+        size_bytes=archive_bytes,
+        size_human=log.human_bytes(archive_bytes),
+        repo_count=len(repos),
+        repos=repos,
     )
     return final_path
 
