@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from artifactory_airlift.config import Settings
@@ -43,7 +44,12 @@ def test_prune_history_keeps_gfs_union_drops_rest(tmp_path: Path) -> None:
     exports = tmp_path / "exports"
     exports.mkdir()
 
-    now = time.time()
+    # Pin "now" to noon UTC mid-month so the 5-hour and 5-day offsets used
+    # below cannot straddle a UTC day or month boundary (e.g. running this
+    # test between 00:00 and 05:00 UTC otherwise puts the 5-hour-old file
+    # on the previous UTC day, making it the lone winner of that day-bucket
+    # under the days tier).
+    now = datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc).timestamp()
     HOUR = 3600
     DAY = 86400
 
@@ -63,7 +69,7 @@ def test_prune_history_keeps_gfs_union_drops_rest(tmp_path: Path) -> None:
         snapshot_retention_months=2,
     )
 
-    _prune_history(settings, snapshots_dir=snaps, exports_dir=exports)
+    _prune_history(settings, snapshots_dir=snaps, exports_dir=exports, now=now)
 
     # hours=3 keeps fresh, h1, h2 (each in their own hour-bucket).
     # days=3 keeps fresh (today) + maybe an extra day; two_days within window.

@@ -434,17 +434,24 @@ def _prune_history(
     *,
     snapshots_dir: Path,
     exports_dir: Path,
+    now: float | None = None,
 ) -> None:
     # Snapshots: GFS retention. Each tier keeps the newest snapshot per
     # non-empty bucket within its wall-clock window from now. The just-
     # written snapshot always wins its current bucket in any non-zero
     # tier, so the diff baseline for the next cycle is preserved.
+    #
+    # ``now`` is exposed for tests that need to pin the wall clock to a
+    # known UTC time so bucket boundaries (especially the day boundary)
+    # are deterministic across runs; production passes None and falls
+    # back to time.time() inside gfs_keepers.
     snapshot_paths = list(snapshots_dir.glob("*.jsonl"))
     keepers = state.gfs_keepers(
         snapshot_paths,
         hours=settings.snapshot_retention_hours,
         days=settings.snapshot_retention_days,
         months=settings.snapshot_retention_months,
+        now=now,
     )
     state.prune_to_keepers(snapshots_dir, keepers, pattern="*.jsonl")
 
