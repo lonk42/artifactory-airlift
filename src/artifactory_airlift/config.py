@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -6,6 +7,47 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Mode = Literal["sender", "receiver"]
+
+
+# Byte-size suffixes matching the Kubernetes "quantity" convention used by
+# PVC sizes etc. IEC binary suffixes (Ki/Mi/Gi/Ti) and decimal SI suffixes
+# (K/M/G/T) are both accepted; an optional trailing "B" is allowed for
+# readability ("8GiB" is the same as "8Gi"). Bare numbers are bytes.
+_BYTE_UNITS = {
+    "": 1, "B": 1,
+    "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4,
+    "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4,
+    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
+    "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3, "TiB": 1024**4,
+}
+_BYTE_SIZE_RE = re.compile(r"^\s*(\d+)\s*([A-Za-z]*)\s*$")
+
+
+def _parse_byte_size(v: int | str) -> int:
+    """Coerce a k8s-style quantity string ("8Gi", "512Mi", "1G", "0") to an int.
+
+    Integer inputs pass through unchanged. Suffix matching is case-sensitive
+    on the unit prefix (k8s convention: Ki != ki) but the trailing "B" can
+    be any case. Fractional quantities are not supported on purpose; PVC
+    sizing rounds the same way.
+    """
+    if isinstance(v, bool):  # bool is an int subclass; reject explicitly
+        raise TypeError(f"expected int or quantity string, got bool: {v!r}")
+    if isinstance(v, int):
+        return v
+    if not isinstance(v, str):
+        raise TypeError(f"expected int or quantity string, got {type(v).__name__}: {v!r}")
+    m = _BYTE_SIZE_RE.match(v)
+    if not m:
+        raise ValueError(f"invalid byte-size quantity: {v!r}")
+    num, unit = m.group(1), m.group(2)
+    # Normalise the trailing B (e.g. "8GIB" -> "8GiB" key form).
+    if unit and unit.endswith(("B", "b")) and len(unit) > 1:
+        unit = unit[:-1] + "B"
+    mult = _BYTE_UNITS.get(unit)
+    if mult is None:
+        raise ValueError(f"unknown byte-size unit: {unit!r} in {v!r}")
+    return int(num) * mult
 
 
 class Settings(BaseSettings):
@@ -32,6 +74,26 @@ class Settings(BaseSettings):
     cycle_seconds: int = Field(default=300, ge=10)
     history_keep: int = Field(default=24, ge=1)
     done_keep_hours: int = Field(default=72, ge=1)
+
+    # Sender chunking + spool backpressure. A single cycle's add-entries are
+    # split into N archives of cumulative raw blob bytes <= max_archive_bytes.
+    # Most package formats are already-compressed, so raw ~= compressed for
+    # threshold purposes. Set to 0 to disable chunking (single archive per
+    # cycle, the pre-0.7 behaviour). Before each chunk build the sender
+    # requires shutil.disk_usage(spool_dir).free to exceed
+    # spool_min_free_bytes + the projected chunk size; otherwise the cycle is
+    # aborted, partial chunks for the parent are cleaned up, and the cursor
+    # is left untouched so the next loop tick retries from the same baseline.
+    #
+    # Both fields accept either an int (bytes) or a k8s-style quantity
+    # string ("8Gi", "512Mi", "1G", "0"); see _parse_byte_size.
+    max_archive_bytes: int = Field(default=8 * 1024**3, ge=0)
+    spool_min_free_bytes: int = Field(default=2 * 1024**3, ge=0)
+
+    @field_validator("max_archive_bytes", "spool_min_free_bytes", mode="before")
+    @classmethod
+    def _coerce_byte_size(cls, v):
+        return _parse_byte_size(v)
 
     # GFS retention for sender-side snapshot baselines (state/snapshots/*.jsonl).
     # Each tier independently keeps the newest snapshot in each non-empty

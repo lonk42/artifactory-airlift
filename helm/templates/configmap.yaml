@@ -16,6 +16,8 @@ data:
     cycle_seconds: {{ .Values.cycleSeconds }}
     history_keep: {{ .Values.historyKeep }}
     done_keep_hours: {{ .Values.doneKeepHours }}
+    max_archive_bytes: {{ .Values.maxArchiveBytes | quote }}
+    spool_min_free_bytes: {{ .Values.spoolMinFreeBytes | quote }}
     snapshot_retention_hours: {{ .Values.snapshotRetentionHours }}
     snapshot_retention_days: {{ .Values.snapshotRetentionDays }}
     snapshot_retention_months: {{ .Values.snapshotRetentionMonths }}
