@@ -94,6 +94,37 @@ def new_cycle_id() -> str:
     return f"{int(time.time()):010d}-{uuid.uuid4().hex[:8]}"
 
 
+def sweep_orphan_partials(spool_dir: Path) -> tuple[int, int]:
+    """Remove leftover ``*.tar.zst.partial`` files and ``.staging/`` subdirs.
+
+    Called at process start, before the cycle loop runs. A SIGKILL during
+    ``archive.build`` (OOM, node drain, container restart) can leave a
+    half-written ``<cycle_id>.tar.zst.partial`` file and an empty staging
+    directory in spool; neither is picked up by the receiver's
+    ``*.tar.zst`` glob, but they consume disk space and survive forever
+    otherwise. Returns ``(partials_removed, staging_dirs_removed)`` so
+    the caller can log a summary; both zero on a clean tree.
+    """
+    partials = 0
+    staging_dirs = 0
+    if not spool_dir.is_dir():
+        return 0, 0
+    for p in spool_dir.glob("*.tar.zst.partial"):
+        try:
+            p.unlink()
+            partials += 1
+        except FileNotFoundError:
+            pass
+    staging_root = spool_dir / ".staging"
+    if staging_root.is_dir():
+        for sub in staging_root.iterdir():
+            if not sub.is_dir():
+                continue
+            shutil.rmtree(sub, ignore_errors=True)
+            staging_dirs += 1
+    return partials, staging_dirs
+
+
 def build(
     *,
     spool_dir: Path,

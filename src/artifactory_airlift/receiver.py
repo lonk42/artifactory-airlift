@@ -21,6 +21,18 @@ def run(settings: Settings) -> int:
     for p in (state_dir, settings.spool_dir, done_dir):
         p.mkdir(parents=True, exist_ok=True)
 
+    # The transport mechanism may have crashed mid-write, leaving a
+    # ``.partial`` file in spool. The cycle loop's ``*.tar.zst`` glob
+    # ignores partials so they would not cause processing issues, but
+    # they sit on the spool PVC forever. Sweep once on startup.
+    partials, staging = archive.sweep_orphan_partials(settings.spool_dir)
+    if partials or staging:
+        logger.info(
+            "receiver.startup_sweep",
+            partials_removed=partials,
+            staging_dirs_removed=staging,
+        )
+
     try:
         filestore.probe(
             settings.filestore_root,

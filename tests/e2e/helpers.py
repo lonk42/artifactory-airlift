@@ -38,10 +38,14 @@ def shuttle_spool(
     src_dir: str = "/var/airlift/spool",
     dst_dir: str = "/var/airlift/spool",
 ) -> list[str]:
-    """Copy any *.tar.zst archive in the sender's spool to the receiver's spool.
+    """Move any *.tar.zst archive from the sender's spool to the receiver's.
 
-    Stands in for the real one-way transport channel during e2e tests.
-    Returns the list of archive filenames moved.
+    Stands in for the real one-way air-gap transport channel during e2e
+    tests. Each successful per-archive transfer deletes the source file,
+    matching the move-semantics a real transport would have. This is
+    critical now that the sender enforces a "one delta in flight" gate:
+    archives left in the sender's spool would prevent it from starting
+    the next cycle. Returns the list of archive filenames moved.
     """
     listing = kubectl_run([
         kubectl, "-n", src_ns, "exec", src_pod, "-c", container, "--",
@@ -74,5 +78,22 @@ def shuttle_spool(
         cat.wait()
         if write.returncode != 0 or cat.returncode != 0:
             raise RuntimeError(f"shuttle failed for {name}")
+        # Only delete the source after the destination rename succeeded.
+        # If this rm fails we surface the error rather than leaving the
+        # archive duplicated; a retry on the same file is a no-op on the
+        # destination side (cycle_id already in processed.jsonl) but
+        # would deadlock the pending-gate if it stayed on the source.
+        rm = subprocess.run(
+            [kubectl, "-n", src_ns, "exec", src_pod, "-c", container, "--",
+             "rm", "-f", path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if rm.returncode != 0:
+            raise RuntimeError(
+                f"shuttle moved {name} to dst but failed to delete source: "
+                f"{rm.stderr.strip() or rm.stdout.strip()}"
+            )
         moved.append(name)
     return moved

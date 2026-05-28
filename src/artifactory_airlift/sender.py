@@ -22,6 +22,18 @@ def run(settings: Settings) -> int:
     for p in (state_dir, snapshots_dir, exports_dir, settings.spool_dir):
         p.mkdir(parents=True, exist_ok=True)
 
+    # Clean up half-written archives left behind by a SIGKILL on a prior
+    # run (OOM, node drain, container restart mid-build). Neither the
+    # receiver nor the pending-gate look at .partial files, so they would
+    # otherwise sit on the spool PVC indefinitely.
+    partials, staging = archive.sweep_orphan_partials(settings.spool_dir)
+    if partials or staging:
+        logger.info(
+            "sender.startup_sweep",
+            partials_removed=partials,
+            staging_dirs_removed=staging,
+        )
+
     try:
         with state.file_lock(lock_path):
             return _loop(
@@ -75,6 +87,24 @@ def _cycle(
 ) -> None:
     if not client.ping():
         logger.warning("sender.ping_not_ok")
+        return
+
+    # "One delta in flight" gate. If a prior cycle's archives are still in
+    # spool waiting for the transport to pick them up, do not start a new
+    # cycle. Producing another delta on top of pending ones piles snapshot
+    # and export-tree orphans on the state PVC (no _prune_history call
+    # happens until a cycle succeeds), produces deltas that race the
+    # transport, and muddies the "diff since the last delivered cycle"
+    # mental model. Glob only finalised "*.tar.zst" files; "*.partial"
+    # files left by SIGKILL during a build are out of scope here and
+    # should be reaped by a separate startup sweep.
+    pending = sorted(settings.spool_dir.glob("*.tar.zst"))
+    if pending:
+        logger.info(
+            "sender.cycle_skipped_pending",
+            pending_count=len(pending),
+            pending=[p.name for p in pending],
+        )
         return
 
     cycle_id = archive.new_cycle_id()

@@ -92,11 +92,43 @@ def test_chunked_initial_delta(art_a, art_b, test_repo, cycle_seconds, kube):
 
     print(
         f"\n  threshold={threshold}B ({threshold / 1024**2:.1f}MiB); "
-        f"uploading {blob_count} blobs of {blob_size}B each "
+        f"will upload {blob_count} blobs of {blob_size}B each "
         f"({blob_count * blob_size / 1024**2:.1f}MiB total)",
         flush=True,
     )
 
+    pod_a = pod_for(kube["kubectl"], kube["ns_a"], kube["selector"])
+    pod_b = pod_for(kube["kubectl"], kube["ns_b"], kube["selector"])
+    print(f"  pods: src={pod_a} dst={pod_b}; cycle={cycle_seconds}s", flush=True)
+
+    # The sender's "one delta in flight" gate refuses to start a cycle while
+    # any prior archive remains in spool. Drain leftover archives from prior
+    # runs BEFORE the upload, so the first post-upload cycle is unambiguously
+    # the chunked cycle we are about to assert on.
+    drain_started = time.time()
+
+    def _spool_drained():
+        names = _spool_listing(kube["kubectl"], kube["ns_a"], pod_a)
+        moved = shuttle_spool(
+            kube["kubectl"], src_ns=kube["ns_a"], dst_ns=kube["ns_b"],
+            src_pod=pod_a, dst_pod=pod_b,
+        ) if names else []
+        elapsed = time.time() - drain_started
+        print(
+            f"  [{elapsed:5.1f}s] drain pass: pre={len(names)} moved={len(moved)}",
+            flush=True,
+        )
+        post = _spool_listing(kube["kubectl"], kube["ns_a"], pod_a)
+        return len(post) == 0
+
+    assert wait_until(_spool_drained, timeout=cycle_seconds * 6 + 60, interval=5), (
+        "sender spool would not drain; the new chunked cycle cannot start "
+        "while archives remain (\"one delta in flight\" gate). Check the "
+        "transport between A and B."
+    )
+
+    # Spool is empty. Upload the payload; the next sender cycle will pick
+    # it up and produce a chunked delta.
     artifacts: list[tuple[str, bytes, str]] = []
     run_id = uuid.uuid4().hex[:8]
     for i in range(blob_count):
@@ -106,10 +138,6 @@ def test_chunked_initial_delta(art_a, art_b, test_repo, cycle_seconds, kube):
         deploy(art_a, test_repo, name, blob, sha1)
         artifacts.append((name, blob, sha1))
         print(f"  uploaded {name} sha1={sha1[:12]}", flush=True)
-
-    pod_a = pod_for(kube["kubectl"], kube["ns_a"], kube["selector"])
-    pod_b = pod_for(kube["kubectl"], kube["ns_b"], kube["selector"])
-    print(f"  pods: src={pod_a} dst={pod_b}; cycle={cycle_seconds}s", flush=True)
 
     # Wait until the sender writes a chunked cycle (>= 2 archives sharing one
     # parent_cycle_id). Filenames match "<parent>-cNNN.tar.zst"; the bare

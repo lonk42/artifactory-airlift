@@ -36,6 +36,8 @@ _EVENT_TEMPLATES: dict[str, str] = {
 
     # Sender lifecycle.
     "sender.cycle_start": "Cycle starting; running Artifactory system export.",
+    "sender.cycle_skipped_pending": "Skipping cycle: {pending_count} archive(s) still in spool awaiting transport.",
+    "sender.startup_sweep": "Startup sweep: removed {partials_removed} orphan .partial file(s) and {staging_dirs_removed} staging dir(s).",
     "sender.repos_excluded": "Excluding {count} repo(s) from sync: {repos}",
     "sender.list_repositories_failed": "Could not list repositories for packageType filter ({error}); falling back to name-only exclusion.",
     "sender.snapshot_written": "Snapshot written: {count} artifacts across {repo_count} repos.",
@@ -67,6 +69,7 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "receiver.delete_missing": "Delete: {repo}/{path} was already absent (404).",
     "receiver.deletes_applied": "Deletes: {deleted} applied, {failed} failed.",
     "receiver.cycle_done": "Cycle done: status={status}.",
+    "receiver.startup_sweep": "Startup sweep: removed {partials_removed} orphan .partial file(s) and {staging_dirs_removed} staging dir(s).",
     "receiver.chunk_waiting": "Final chunk {chunk_seq}/{chunk_total} for parent={parent_cycle_id} waiting for chunks: {missing}.",
     "receiver.chunk_staged": "Chunk {chunk_seq}/{chunk_total} staged (parent={parent_cycle_id}): {written} blob(s) written, {skipped} skipped.",
     "receiver.ping_not_ok": "Artifactory ping failed; skipping cycle.",
@@ -123,6 +126,7 @@ _EXTRA_CONSUMED: dict[str, set[str]] = {
     "sender.chunk_finalized": {"size_bytes", "repos", "parent_cycle_id"},
     "sender.cycle_chunked": {"raw_bytes", "threshold_bytes"},
     "sender.spool_backpressure": {"free_bytes", "required_bytes"},
+    "sender.cycle_skipped_pending": {"pending"},
     "receiver.chunk_staged": {"parent_cycle_id"},
     "archive.built": {"size_bytes", "total_bytes", "repos"},
     "receiver.extract_start": {"size_bytes"},
