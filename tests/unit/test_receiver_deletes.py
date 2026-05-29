@@ -101,6 +101,7 @@ def test_receiver_applies_removals_success(tmp_path: Path) -> None:
         client=client,
         archive_path=target,
         processed=set(),
+        parent_chunks={},
         processed_path=processed_path,
         done_dir=done_dir,
     )
@@ -130,6 +131,7 @@ def test_receiver_404_logged_not_partial(tmp_path: Path) -> None:
         client=client,
         archive_path=target,
         processed=set(),
+        parent_chunks={},
         processed_path=processed_path,
         done_dir=done_dir,
     )
@@ -160,6 +162,7 @@ def test_receiver_delete_exception_logged_not_partial(tmp_path: Path) -> None:
         client=client,
         archive_path=target,
         processed=set(),
+        parent_chunks={},
         processed_path=processed_path,
         done_dir=done_dir,
     )
@@ -186,6 +189,7 @@ def test_receiver_no_removals_field_is_noop(tmp_path: Path) -> None:
         client=client,
         archive_path=target,
         processed=set(),
+        parent_chunks={},
         processed_path=processed_path,
         done_dir=done_dir,
     )

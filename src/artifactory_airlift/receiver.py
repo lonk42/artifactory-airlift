@@ -21,6 +21,18 @@ def run(settings: Settings) -> int:
     for p in (state_dir, settings.spool_dir, done_dir):
         p.mkdir(parents=True, exist_ok=True)
 
+    # The transport mechanism may have crashed mid-write, leaving a
+    # ``.partial`` file in spool. The cycle loop's ``*.tar.zst`` glob
+    # ignores partials so they would not cause processing issues, but
+    # they sit on the spool PVC forever. Sweep once on startup.
+    partials, staging = archive.sweep_orphan_partials(settings.spool_dir)
+    if partials or staging:
+        logger.info(
+            "receiver.startup_sweep",
+            partials_removed=partials,
+            staging_dirs_removed=staging,
+        )
+
     try:
         filestore.probe(
             settings.filestore_root,
@@ -82,7 +94,7 @@ def _cycle(
         logger.warning("receiver.ping_not_ok")
         return
 
-    processed = _load_processed(processed_path)
+    processed, parent_chunks = _load_processed(processed_path)
     _prune_done(done_dir, settings.done_keep_hours)
 
     archives = sorted(settings.spool_dir.glob("*.tar.zst"))
@@ -100,6 +112,7 @@ def _cycle(
                 client=client,
                 archive_path=archive_path,
                 processed=processed,
+                parent_chunks=parent_chunks,
                 processed_path=processed_path,
                 done_dir=done_dir,
             )
@@ -113,6 +126,7 @@ def _process_one(
     client: ArtifactoryClient,
     archive_path: Path,
     processed: set[str],
+    parent_chunks: dict[str, set[int]],
     processed_path: Path,
     done_dir: Path,
 ) -> None:
@@ -163,6 +177,31 @@ def _process_one(
             note="processing anyway",
         )
 
+    # Chunked-cycle ordering guard. The sender's "commit" chunk (the final
+    # one) carries the metadata tree and the removed[] list; it must not be
+    # processed until every earlier chunk for the same parent has staged
+    # its blobs into the filestore, otherwise import_repositories will fail
+    # for artifacts whose bytes haven't landed yet. Leave the archive in
+    # spool; the next receiver tick re-evaluates after the missing chunks
+    # are processed.
+    is_chunked = manifest.chunk_total > 1
+    parent = manifest.parent_cycle_id or cycle_id
+    if is_chunked and manifest.is_final_chunk:
+        seen = parent_chunks.get(parent, set())
+        expected = set(range(1, manifest.chunk_total))
+        missing = sorted(expected - seen)
+        if missing:
+            logger.info(
+                "receiver.chunk_waiting",
+                cycle_id=cycle_id,
+                parent_cycle_id=parent,
+                chunk_seq=manifest.chunk_seq,
+                chunk_total=manifest.chunk_total,
+                missing=missing,
+            )
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return
+
     blobs_root = work_dir / archive.BLOBS_PREFIX
     written = 0
     skipped = 0
@@ -192,6 +231,44 @@ def _process_one(
         written=written,
         skipped=skipped,
     )
+
+    # Non-final chunks of a chunked cycle just stage blobs into the
+    # filestore. The "commit" chunk (with chunk_seq == chunk_total) is the
+    # one that carries the metadata tree and runs import_repositories +
+    # deletes against the now-complete blob set. Record the staged chunk
+    # in processed.jsonl with a distinct status so operators can grep for
+    # parent_cycle_id and see the full chunk set.
+    if is_chunked and not manifest.is_final_chunk:
+        state.append_jsonl(
+            processed_path,
+            {
+                "cycle_id": cycle_id,
+                "parent_cycle_id": parent,
+                "chunk_seq": manifest.chunk_seq,
+                "chunk_total": manifest.chunk_total,
+                "status": "blob-staged",
+                "blob_count": manifest.blob_count,
+                "total_bytes": manifest.total_bytes,
+                "repos": manifest.repos,
+                "processed_at": int(time.time()),
+            },
+        )
+        processed.add(cycle_id)
+        parent_chunks.setdefault(parent, set()).add(manifest.chunk_seq)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        done_target = done_dir / archive_path.name
+        archive_path.replace(done_target)
+        logger.info(
+            "receiver.chunk_staged",
+            cycle_id=cycle_id,
+            parent_cycle_id=parent,
+            chunk_seq=manifest.chunk_seq,
+            chunk_total=manifest.chunk_total,
+            written=written,
+            skipped=skipped,
+            moved_to=str(done_target),
+        )
+        return
 
     # Per-repo summary of what this archive carries, derived from the manifest
     # entries[]. This is the same data Artifactory will see in the import call,
@@ -294,21 +371,25 @@ def _process_one(
         )
 
     status = "ok" if not failures else "partial"
-    state.append_jsonl(
-        processed_path,
-        {
-            "cycle_id": cycle_id,
-            "status": status,
-            "blob_count": manifest.blob_count,
-            "total_bytes": manifest.total_bytes,
-            "repos": manifest.repos,
-            "failures": failures,
-            "deleted_count": deleted,
-            "delete_failures": delete_failures,
-            "processed_at": int(time.time()),
-        },
-    )
+    row = {
+        "cycle_id": cycle_id,
+        "status": status,
+        "blob_count": manifest.blob_count,
+        "total_bytes": manifest.total_bytes,
+        "repos": manifest.repos,
+        "failures": failures,
+        "deleted_count": deleted,
+        "delete_failures": delete_failures,
+        "processed_at": int(time.time()),
+    }
+    if is_chunked:
+        row["parent_cycle_id"] = parent
+        row["chunk_seq"] = manifest.chunk_seq
+        row["chunk_total"] = manifest.chunk_total
+    state.append_jsonl(processed_path, row)
     processed.add(cycle_id)
+    if is_chunked:
+        parent_chunks.setdefault(parent, set()).add(manifest.chunk_seq)
     shutil.rmtree(work_dir, ignore_errors=True)
 
     done_target = done_dir / archive_path.name
@@ -321,13 +402,24 @@ def _process_one(
     )
 
 
-def _load_processed(path: Path) -> set[str]:
+def _load_processed(path: Path) -> tuple[set[str], dict[str, set[int]]]:
+    """Return (cycle_ids, parent->{chunk_seq}) from the ledger.
+
+    The first set drives the per-archive dedup check. The second map is
+    consulted by chunked-cycle "commit" chunks to verify all earlier
+    chunks have already staged their blobs.
+    """
     seen: set[str] = set()
+    parent_chunks: dict[str, set[int]] = {}
     for entry in state.read_jsonl(path):
         cid = entry.get("cycle_id")
         if isinstance(cid, str):
             seen.add(cid)
-    return seen
+        parent = entry.get("parent_cycle_id")
+        seq = entry.get("chunk_seq")
+        if isinstance(parent, str) and isinstance(seq, int):
+            parent_chunks.setdefault(parent, set()).add(seq)
+    return seen, parent_chunks
 
 
 def _prune_done(done_dir: Path, hours: int) -> None:

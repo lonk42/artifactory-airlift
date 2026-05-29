@@ -18,7 +18,7 @@ from .export_unpacker import ArtifactEntry
 
 logger = log.get("artifactory.archive")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MANIFEST_NAME = "manifest.json"
 BLOBS_PREFIX = "blobs"
 METADATA_PREFIX = "metadata"
@@ -36,6 +36,13 @@ class Manifest:
     total_bytes: int
     entries: list[dict] = field(default_factory=list)
     removed: list[dict] = field(default_factory=list)
+    # Chunking metadata. For unchunked cycles parent_cycle_id == cycle_id and
+    # chunk_seq == chunk_total == 1; chunked cycles share parent_cycle_id
+    # across N archives and use chunk_seq to order them. Schema-v2 archives
+    # omit these fields; from_bytes falls back to the single-chunk view.
+    parent_cycle_id: str | None = None
+    chunk_seq: int = 1
+    chunk_total: int = 1
 
     def to_json(self) -> bytes:
         return json.dumps(
@@ -50,6 +57,9 @@ class Manifest:
                 "total_bytes": self.total_bytes,
                 "entries": self.entries,
                 "removed": self.removed,
+                "parent_cycle_id": self.parent_cycle_id or self.cycle_id,
+                "chunk_seq": self.chunk_seq,
+                "chunk_total": self.chunk_total,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -58,9 +68,10 @@ class Manifest:
     @classmethod
     def from_bytes(cls, data: bytes) -> "Manifest":
         d = json.loads(data)
+        cycle_id = str(d["cycle_id"])
         return cls(
             schema=int(d["schema"]),
-            cycle_id=str(d["cycle_id"]),
+            cycle_id=cycle_id,
             prev_cycle_id=d.get("prev_cycle_id"),
             created_at=int(d["created_at"]),
             source_instance=str(d.get("source_instance", "")),
@@ -69,11 +80,49 @@ class Manifest:
             total_bytes=int(d.get("total_bytes", 0)),
             entries=list(d.get("entries", [])),
             removed=list(d.get("removed", [])),
+            parent_cycle_id=d.get("parent_cycle_id") or cycle_id,
+            chunk_seq=int(d.get("chunk_seq", 1)),
+            chunk_total=int(d.get("chunk_total", 1)),
         )
+
+    @property
+    def is_final_chunk(self) -> bool:
+        return self.chunk_seq >= self.chunk_total
 
 
 def new_cycle_id() -> str:
     return f"{int(time.time()):010d}-{uuid.uuid4().hex[:8]}"
+
+
+def sweep_orphan_partials(spool_dir: Path) -> tuple[int, int]:
+    """Remove leftover ``*.tar.zst.partial`` files and ``.staging/`` subdirs.
+
+    Called at process start, before the cycle loop runs. A SIGKILL during
+    ``archive.build`` (OOM, node drain, container restart) can leave a
+    half-written ``<cycle_id>.tar.zst.partial`` file and an empty staging
+    directory in spool; neither is picked up by the receiver's
+    ``*.tar.zst`` glob, but they consume disk space and survive forever
+    otherwise. Returns ``(partials_removed, staging_dirs_removed)`` so
+    the caller can log a summary; both zero on a clean tree.
+    """
+    partials = 0
+    staging_dirs = 0
+    if not spool_dir.is_dir():
+        return 0, 0
+    for p in spool_dir.glob("*.tar.zst.partial"):
+        try:
+            p.unlink()
+            partials += 1
+        except FileNotFoundError:
+            pass
+    staging_root = spool_dir / ".staging"
+    if staging_root.is_dir():
+        for sub in staging_root.iterdir():
+            if not sub.is_dir():
+                continue
+            shutil.rmtree(sub, ignore_errors=True)
+            staging_dirs += 1
+    return partials, staging_dirs
 
 
 def build(
@@ -87,11 +136,25 @@ def build(
     filestore_root: Path,
     removed: Iterable[ArtifactEntry] = (),
     zstd_level: int = 10,
+    archive_name: str | None = None,
+    parent_cycle_id: str | None = None,
+    chunk_seq: int = 1,
+    chunk_total: int = 1,
+    include_metadata: bool = True,
+    skip_blob_sha1s: Iterable[str] = (),
 ) -> Path:
     """Build a per-cycle archive atomically in ``spool_dir``.
 
     Returns the final archive path. Caller is responsible for ensuring
     ``spool_dir`` exists.
+
+    Chunking: when ``chunk_total > 1`` the caller is splitting one logical
+    cycle's diff across multiple archives. Pass ``parent_cycle_id`` (shared
+    across chunks), ``chunk_seq`` (1-based), and ``archive_name`` to control
+    the on-disk filename. Non-final chunks pass ``include_metadata=False``
+    to skip the export tree (only the final chunk's import call needs it),
+    and ``skip_blob_sha1s`` to suppress blobs already packed in earlier
+    chunks (deduplication across the whole logical cycle).
     """
     spool_dir.mkdir(parents=True, exist_ok=True)
     staging = spool_dir / ".staging" / cycle_id
@@ -103,8 +166,9 @@ def build(
     removed_list = list(removed)
     repos = sorted({e.repo_key for e in entries_list} | {e.repo_key for e in removed_list})
     total_bytes = 0
+    skip_set = set(skip_blob_sha1s)
 
-    final_name = f"{cycle_id}.tar.zst"
+    final_name = archive_name or f"{cycle_id}.tar.zst"
     partial_path = spool_dir / f"{final_name}.partial"
     final_path = spool_dir / final_name
 
@@ -117,15 +181,25 @@ def build(
             #    trees, and the per-repo /import endpoint is broken in
             #    Artifactory 7.146.x (routes to updateRepository with an
             #    NPE on repositoryConfigMap).
-            for entry in sorted(export_root.iterdir()):
-                tar.add(entry, arcname=f"{METADATA_PREFIX}/{entry.name}")
+            #
+            #    Chunked cycles defer metadata to the final chunk (the
+            #    "commit" chunk). Earlier chunks just stage blobs; the
+            #    receiver only runs /api/import/repositories on the chunk
+            #    that ships the tree, by which point all blobs from the
+            #    sibling chunks are already in the filestore.
+            if include_metadata:
+                for entry in sorted(export_root.iterdir()):
+                    tar.add(entry, arcname=f"{METADATA_PREFIX}/{entry.name}")
 
-            # 2. Raw filestore blobs (dedup by sha1).
-            seen: set[str] = set()
+            # 2. Raw filestore blobs (dedup by sha1, plus skip any sha1
+            #    already packed by an earlier chunk).
+            seen: set[str] = set(skip_set)
+            packed: set[str] = set()
             for entry in entries_list:
                 if entry.sha1 in seen:
                     continue
                 seen.add(entry.sha1)
+                packed.add(entry.sha1)
                 blob = filestore_root / entry.sha1[:2] / entry.sha1
                 if not blob.is_file():
                     logger.warning(
@@ -152,7 +226,7 @@ def build(
                 created_at=int(time.time()),
                 source_instance=source_instance,
                 repos=repos,
-                blob_count=len(seen),
+                blob_count=len(packed),
                 total_bytes=total_bytes,
                 entries=[
                     {
@@ -172,6 +246,9 @@ def build(
                     }
                     for e in removed_list
                 ],
+                parent_cycle_id=parent_cycle_id or cycle_id,
+                chunk_seq=chunk_seq,
+                chunk_total=chunk_total,
             )
             manifest_bytes = manifest.to_json()
             info = tarfile.TarInfo(name=MANIFEST_NAME)

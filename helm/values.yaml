@@ -36,6 +36,26 @@ cycleSeconds: 300
 historyKeep: 24
 doneKeepHours: 72
 
+# Sender chunking + spool backpressure.
+#
+# maxArchiveBytes splits one cycle's diff into multiple archives whose
+# cumulative raw blob bytes stay under the threshold. Only the final
+# chunk carries the metadata tree and removed[] list; earlier chunks
+# are pure blob payloads. Filenames become "<cycle_id>-cNNN.tar.zst";
+# single-chunk cycles keep the legacy "<cycle_id>.tar.zst" form. Set
+# 0 to disable chunking (one monolithic archive per cycle).
+#
+# spoolMinFreeBytes is the high-water mark for free space on the spool
+# volume. Before each chunk build the sender requires
+# `disk_usage(spool).free >= spoolMinFreeBytes + projected chunk size`;
+# otherwise the cycle aborts cleanly, any partial chunks for the parent
+# are removed, and the cursor is left untouched so the next loop tick
+# retries from the same baseline.
+# Quantities accept k8s-style suffixes (Ki/Mi/Gi/Ti, K/M/G/T, plain bytes).
+# Use "0" to disable chunking.
+maxArchiveBytes: 8Gi
+spoolMinFreeBytes: 2Gi
+
 # GFS retention for sender-side snapshot baselines (state/snapshots/*.jsonl).
 # Each tier keeps one snapshot per bucket for the configured count of
 # buckets, measured from now (wall clock). The kept set is the union of

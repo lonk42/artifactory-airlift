@@ -22,6 +22,18 @@ def run(settings: Settings) -> int:
     for p in (state_dir, snapshots_dir, exports_dir, settings.spool_dir):
         p.mkdir(parents=True, exist_ok=True)
 
+    # Clean up half-written archives left behind by a SIGKILL on a prior
+    # run (OOM, node drain, container restart mid-build). Neither the
+    # receiver nor the pending-gate look at .partial files, so they would
+    # otherwise sit on the spool PVC indefinitely.
+    partials, staging = archive.sweep_orphan_partials(settings.spool_dir)
+    if partials or staging:
+        logger.info(
+            "sender.startup_sweep",
+            partials_removed=partials,
+            staging_dirs_removed=staging,
+        )
+
     try:
         with state.file_lock(lock_path):
             return _loop(
@@ -75,6 +87,24 @@ def _cycle(
 ) -> None:
     if not client.ping():
         logger.warning("sender.ping_not_ok")
+        return
+
+    # "One delta in flight" gate. If a prior cycle's archives are still in
+    # spool waiting for the transport to pick them up, do not start a new
+    # cycle. Producing another delta on top of pending ones piles snapshot
+    # and export-tree orphans on the state PVC (no _prune_history call
+    # happens until a cycle succeeds), produces deltas that race the
+    # transport, and muddies the "diff since the last delivered cycle"
+    # mental model. Glob only finalised "*.tar.zst" files; "*.partial"
+    # files left by SIGKILL during a build are out of scope here and
+    # should be reaped by a separate startup sweep.
+    pending = sorted(settings.spool_dir.glob("*.tar.zst"))
+    if pending:
+        logger.info(
+            "sender.cycle_skipped_pending",
+            pending_count=len(pending),
+            pending=[p.name for p in pending],
+        )
         return
 
     cycle_id = archive.new_cycle_id()
@@ -186,30 +216,17 @@ def _cycle(
         logger.info("sender.no_changes", cycle_id=cycle_id)
         return
 
-    archive_path = archive.build(
-        spool_dir=settings.spool_dir,
+    if not _emit_archives(
+        settings,
         cycle_id=cycle_id,
         prev_cycle_id=prev_cycle_id,
-        source_instance=settings.instance_name,
-        export_root=export_contents,
-        entries=new_entries,
-        filestore_root=settings.filestore_root,
-        removed=removed_entries,
-    )
-    archive_size = archive_path.stat().st_size
-    archive_repos = sorted(
-        {e.repo_key for e in new_entries} | {e.repo_key for e in removed_entries}
-    )
-    logger.info(
-        "sender.archive_finalized",
-        cycle_id=cycle_id,
-        path=str(archive_path),
-        size_bytes=archive_size,
-        size_human=log.human_bytes(archive_size),
-        blob_count=len(new_entries),
-        repo_count=len(archive_repos),
-        repos=archive_repos,
-    )
+        export_contents=export_contents,
+        new_entries=new_entries,
+        removed_entries=removed_entries,
+    ):
+        # Backpressure or other abort. Do not advance the cursor: next
+        # cycle re-runs the diff against the same baseline.
+        return
 
     _advance_cursor(cursor_path, cycle_id)
     _prune_history(
@@ -217,6 +234,207 @@ def _cycle(
         snapshots_dir=snapshots_dir,
         exports_dir=exports_dir,
     )
+
+
+# Headroom budgeted on top of the raw blob bytes when projecting a chunk's
+# on-disk footprint. Covers the metadata tree (final chunk only), tar
+# block padding, and a margin for compressed sizes occasionally exceeding
+# raw for already-compressed package formats. 256 MiB is plenty for the
+# JFrog system-export tree on a populated cluster.
+_CHUNK_OVERHEAD_BYTES = 256 * 1024 * 1024
+
+
+def _group_into_chunks(
+    entries: list,
+    max_archive_bytes: int,
+) -> list[list]:
+    """Split entries into chunks whose cumulative new-blob bytes stay under
+    ``max_archive_bytes``.
+
+    Entries sharing a sha1 with one already placed in an earlier chunk
+    do not consume budget in their own chunk (the blob ships once and is
+    referenced by manifest entries in later chunks via filestore lookup
+    on the receiver). A single entry larger than the threshold gets its
+    own chunk rather than being split (we never fragment a blob).
+    """
+    if max_archive_bytes <= 0 or not entries:
+        return [entries] if entries else []
+
+    chunks: list[list] = []
+    current: list = []
+    current_bytes = 0
+    seen_sha1s: set[str] = set()
+    for e in entries:
+        new_blob = e.sha1 not in seen_sha1s
+        cost = e.size if new_blob else 0
+        if current and new_blob and current_bytes + cost > max_archive_bytes:
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(e)
+        if new_blob:
+            seen_sha1s.add(e.sha1)
+            current_bytes += cost
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _emit_archives(
+    settings: Settings,
+    *,
+    cycle_id: str,
+    prev_cycle_id: str | None,
+    export_contents: Path,
+    new_entries: list,
+    removed_entries: list,
+) -> bool:
+    """Write all archives for one logical cycle.
+
+    Returns True on success (every chunk written and finalised), False if
+    backpressure aborted the cycle. On failure any partial chunks already
+    landed in spool for this parent are removed so the receiver never sees
+    an incomplete chunk set.
+    """
+    # Sort entries deterministically so chunk boundaries are stable across
+    # re-runs (matters when the cycle aborts mid-stream and the next loop
+    # tick re-emits the same diff).
+    sorted_entries = sorted(new_entries, key=lambda e: (e.repo_key, e.repo_path))
+    groups = _group_into_chunks(sorted_entries, settings.max_archive_bytes)
+    if not groups:
+        # No add-blobs but we still have removals to ship. Emit one
+        # metadata+removed-only chunk.
+        groups = [[]]
+    chunk_total = len(groups)
+
+    if chunk_total > 1:
+        total_raw = sum(e.size for e in sorted_entries)
+        logger.info(
+            "sender.cycle_chunked",
+            cycle_id=cycle_id,
+            chunk_total=chunk_total,
+            raw_bytes=total_raw,
+            raw_bytes_human=log.human_bytes(total_raw),
+            threshold_bytes=settings.max_archive_bytes,
+            threshold_human=log.human_bytes(settings.max_archive_bytes),
+        )
+
+    seen_sha1s: set[str] = set()
+    written_paths: list[Path] = []
+    for i, group in enumerate(groups, 1):
+        is_final = i == chunk_total
+        # Project this chunk's on-disk size from its unseen-sha1 blob bytes
+        # plus a fixed overhead for tar/zstd framing and (final-chunk only)
+        # the metadata tree.
+        chunk_bytes = sum(e.size for e in group if e.sha1 not in seen_sha1s)
+        projected = chunk_bytes + _CHUNK_OVERHEAD_BYTES
+
+        free = shutil.disk_usage(settings.spool_dir).free
+        required = settings.spool_min_free_bytes + projected
+        if free < required:
+            logger.warning(
+                "sender.spool_backpressure",
+                cycle_id=cycle_id,
+                chunk_seq=i,
+                chunk_total=chunk_total,
+                free_bytes=free,
+                free_human=log.human_bytes(free),
+                required_bytes=required,
+                required_human=log.human_bytes(required),
+                min_free_human=log.human_bytes(settings.spool_min_free_bytes),
+                projected_human=log.human_bytes(projected),
+            )
+            _cleanup_partial_chunks(settings.spool_dir, cycle_id, written_paths)
+            return False
+
+        chunk_archive_name, chunk_cycle_id = _chunk_names(cycle_id, i, chunk_total)
+        archive_path = archive.build(
+            spool_dir=settings.spool_dir,
+            cycle_id=chunk_cycle_id,
+            prev_cycle_id=prev_cycle_id,
+            source_instance=settings.instance_name,
+            export_root=export_contents,
+            entries=group,
+            filestore_root=settings.filestore_root,
+            removed=removed_entries if is_final else [],
+            archive_name=chunk_archive_name,
+            parent_cycle_id=cycle_id,
+            chunk_seq=i,
+            chunk_total=chunk_total,
+            include_metadata=is_final,
+            skip_blob_sha1s=seen_sha1s,
+        )
+        for e in group:
+            seen_sha1s.add(e.sha1)
+        written_paths.append(archive_path)
+
+        archive_size = archive_path.stat().st_size
+        archive_repos = sorted({e.repo_key for e in group})
+        if chunk_total > 1:
+            logger.info(
+                "sender.chunk_finalized",
+                cycle_id=chunk_cycle_id,
+                parent_cycle_id=cycle_id,
+                chunk_seq=i,
+                chunk_total=chunk_total,
+                path=str(archive_path),
+                size_bytes=archive_size,
+                size_human=log.human_bytes(archive_size),
+                blob_count=len(group),
+                repo_count=len(archive_repos),
+                repos=archive_repos,
+            )
+        else:
+            logger.info(
+                "sender.archive_finalized",
+                cycle_id=chunk_cycle_id,
+                path=str(archive_path),
+                size_bytes=archive_size,
+                size_human=log.human_bytes(archive_size),
+                blob_count=len(group),
+                repo_count=len(archive_repos),
+                repos=archive_repos,
+            )
+    return True
+
+
+def _chunk_names(parent_cycle_id: str, seq: int, total: int) -> tuple[str, str]:
+    """Return (archive_filename, chunk_cycle_id) for a chunk.
+
+    Single-chunk cycles keep today's naming (``<cycle_id>.tar.zst``) so
+    existing log greps and receiver bookkeeping are unaffected. Multi-chunk
+    cycles use ``<parent_cycle_id>-cNNN.tar.zst`` so all chunks sort
+    lexically after the bare cycle id and group together across multiple
+    cycles in the spool listing.
+    """
+    if total <= 1:
+        return f"{parent_cycle_id}.tar.zst", parent_cycle_id
+    suffix = f"c{seq:03d}"
+    chunk_cycle_id = f"{parent_cycle_id}-{suffix}"
+    return f"{chunk_cycle_id}.tar.zst", chunk_cycle_id
+
+
+def _cleanup_partial_chunks(
+    spool_dir: Path, parent_cycle_id: str, written_paths: list[Path]
+) -> None:
+    """Remove any chunk files already on disk for ``parent_cycle_id``.
+
+    Called when backpressure aborts a chunked cycle mid-stream. We delete
+    both the recorded successful chunks and any stragglers matching the
+    parent prefix (e.g. an in-flight ``.partial`` left by a crashed build).
+    The cursor is not advanced, so the next cycle re-emits from the same
+    snapshot diff.
+    """
+    for p in written_paths:
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+    for p in spool_dir.glob(f"{parent_cycle_id}*.tar.zst*"):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _locate_export_contents(export_root: Path) -> Path:
@@ -246,17 +464,24 @@ def _prune_history(
     *,
     snapshots_dir: Path,
     exports_dir: Path,
+    now: float | None = None,
 ) -> None:
     # Snapshots: GFS retention. Each tier keeps the newest snapshot per
     # non-empty bucket within its wall-clock window from now. The just-
     # written snapshot always wins its current bucket in any non-zero
     # tier, so the diff baseline for the next cycle is preserved.
+    #
+    # ``now`` is exposed for tests that need to pin the wall clock to a
+    # known UTC time so bucket boundaries (especially the day boundary)
+    # are deterministic across runs; production passes None and falls
+    # back to time.time() inside gfs_keepers.
     snapshot_paths = list(snapshots_dir.glob("*.jsonl"))
     keepers = state.gfs_keepers(
         snapshot_paths,
         hours=settings.snapshot_retention_hours,
         days=settings.snapshot_retention_days,
         months=settings.snapshot_retention_months,
+        now=now,
     )
     state.prune_to_keepers(snapshots_dir, keepers, pattern="*.jsonl")
 
