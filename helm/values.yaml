@@ -18,10 +18,14 @@ image:
   tag: ""
 
 # Connection to the local Artifactory (talks over loopback as a sidecar).
-# Provide EITHER a bearer access token, OR a username+password pair for
-# basic auth. Basic auth is the only reliable way today to bootstrap
-# against admin endpoints like /api/export/system unless you've minted
-# a proper applied-permissions/admin scoped token via the Access API.
+# Provide EITHER a bearer access token (recommended), OR a username+password
+# pair for basic auth. An admin-scoped access token (applied-permissions/admin,
+# or any token whose subject is an admin user) authorises every endpoint
+# airlift calls, including /api/export/system and /api/import/repositories.
+# Mint it once via the Artifactory UI (Administration > User Management >
+# Access Tokens); it cannot be bootstrapped from username+password. Basic auth
+# takes precedence when both username and password are set, so to use the
+# token leave them empty.
 artifactory:
   url: http://localhost:8081/artifactory
   # Plaintext only for bootstrap / dev. In production this should be

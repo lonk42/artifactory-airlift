@@ -60,7 +60,7 @@ Dockerfile                  multi-stage build, runs as uid 1030
 
 - Two JFrog Artifactory instances deployed to Kubernetes. Only the [jfrog/artifactory](https://github.com/jfrog/charts) Helm chart implementation is covered.
 - The Airlift container image is not yet published in a container registry; you will need to build and publish it yourself.
-- An admin username + password on each Artifactory (see [Authentication](#authentication) below).
+- An admin-scoped access token on each Artifactory (username + password also works as a fallback). See [Authentication](#authentication) below.
 - Every repository that exists on the source must also exist on the destination before the first sync. Repository *definitions* are not propagated by this tool.
 
 ## Building the airlift sidecar image
@@ -89,8 +89,7 @@ helm install artifactory-airlift ./helm \
   --set instanceName=<source-name> \
   --set image.repository=<your-registry>/artifactory-airlift \
   --set image.tag=<version> \
-  --set artifactory.username=admin \
-  --set artifactory.password=<admin-password>
+  --set artifactory.token=<admin-scoped-access-token>
 ```
 
 ### 2. Inject the sidecar into the artifactory pod
@@ -116,10 +115,8 @@ artifactory:
         image: <your-registry>/artifactory-airlift:<version>
         env:
           - { name: AIRLIFT_MODE, value: sender }   # "receiver" on the destination
-          - name: AIRLIFT_ARTIFACTORY_USERNAME
-            valueFrom: { secretKeyRef: { name: artifactory-airlift-token, key: username } }
-          - name: AIRLIFT_ARTIFACTORY_PASSWORD
-            valueFrom: { secretKeyRef: { name: artifactory-airlift-token, key: password } }
+          - name: AIRLIFT_ARTIFACTORY_TOKEN
+            valueFrom: { secretKeyRef: { name: artifactory-airlift-token, key: token } }
         volumeMounts:
           - { name: airlift-state, mountPath: /var/airlift/state }
           - { name: airlift-spool, mountPath: /var/airlift/spool }
@@ -144,9 +141,13 @@ The sender writes finalised archives to `/var/airlift/spool/*.tar.zst`. The rece
 
 ## Authentication
 
-Airlift accepts either a bearer access token *or* a username + password pair. When both are provided basic auth takes precedence.
+Airlift accepts either a bearer access token *or* a username + password pair. When both are provided basic auth takes precedence, so to use the token leave username and password empty.
 
-**Recommendation: use basic auth.** A token minted via the legacy `POST /api/security/token` endpoint with username + password gets `scope=member-of-groups:*`, which Artifactory accepts on read-style admin endpoints but rejects with 401 on destructive ones (notably `/api/export/system`). The proper `applied-permissions/admin` scope can only be requested by an already-admin bearer token via `/access/api/v1/tokens`, which means there is no clean bootstrap path from username/password to an admin-scoped token without going through the Artifactory UI. Basic auth sidesteps this entirely.
+**Recommendation: use an admin-scoped access token.** Generate it once through the Artifactory UI (Administration -> User Management -> Access Tokens) for a user with admin rights, ideally a dedicated service user so the credential is independently revocable, with no expiry. Airlift needs admin-level access because it drives `/api/export/system` on the source and `/api/import/repositories` on the destination; a token scoped to `applied-permissions/admin` (or any token whose subject is an admin user) authorises every endpoint airlift calls. Put it in `artifactory.token` and the chart wires it into the sidecar as `AIRLIFT_ARTIFACTORY_TOKEN`.
+
+A token cannot be bootstrapped programmatically from username + password: the legacy `POST /api/security/token` endpoint only mints `member-of-groups:*`-scoped tokens and refuses the `applied-permissions/admin` scope name, while `/access/api/v1/tokens` (the endpoint that can mint admin scope) rejects both basic auth and legacy tokens. This only affects self-bootstrapping; generating the token in the UI and supplying it directly is the supported path.
+
+Username + password basic auth is still supported as a fallback (set `artifactory.username` and `artifactory.password`) if you would rather not manage a token.
 
 The Helm chart writes the credentials into a Kubernetes Secret named `artifactory-airlift-token` with three keys: `token`, `username`, `password`. The sidecar reads them via the `AIRLIFT_ARTIFACTORY_TOKEN`, `AIRLIFT_ARTIFACTORY_USERNAME`, and `AIRLIFT_ARTIFACTORY_PASSWORD` env vars.
 
@@ -183,7 +184,7 @@ The sender also enforces a **"one delta in flight" gate** at the start of every 
 | `mode`                  | `AIRLIFT_MODE`                   | `sender`                                                 | Which loop to run: `sender` exports + diffs + spools archives; `receiver` ingests archives + writes blobs + imports repos.   |
 | `instance_name`         | `AIRLIFT_INSTANCE_NAME`          | `unknown`                                                | Free-form label recorded in archive manifests and log lines. Helpful when more than one source feeds the same destination.   |
 | `artifactory_url`       | `AIRLIFT_ARTIFACTORY_URL`        | `http://localhost:8081/artifactory`                      | Base URL of the local Artifactory. As a sidecar this is loopback; override only if Artifactory listens on a non-default port.|
-| `artifactory_token`     | `AIRLIFT_ARTIFACTORY_TOKEN`      | `""`                                                     | Bearer access token. Must be `applied-permissions/admin`-scoped to call `/api/export/system`. Ignored when basic auth is set.|
+| `artifactory_token`     | `AIRLIFT_ARTIFACTORY_TOKEN`      | `""`                                                     | Bearer access token. Use an admin-scoped token (subject is an admin user); it authorises every endpoint airlift calls, including `/api/export/system` and `/api/import/repositories`. Ignored when basic auth is set.|
 | `artifactory_username`  | `AIRLIFT_ARTIFACTORY_USERNAME`   | `""`                                                     | Admin username for basic auth. When both username and password are set, basic auth takes precedence over `artifactory_token`.|
 | `artifactory_password`  | `AIRLIFT_ARTIFACTORY_PASSWORD`   | `""`                                                     | Admin password paired with `artifactory_username`. Inject via a Secret; the chart writes this into `artifactory-airlift-token`.|
 | `cycle_seconds`         | `AIRLIFT_CYCLE_SECONDS`          | `300`                                                    | Seconds between cycles. Sender: time between exports/diffs. Receiver: poll interval for new archives in the spool dir.       |
@@ -241,7 +242,7 @@ kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- rm -f /var
 
 **`503` on `/api/system/ping` right after a restart.** Artifactory is still booting. The retry decorator handles it; the next cycle succeeds.
 
-**`401` on `/api/export/system`.** You're authenticating with a legacy access token whose scope is `member-of-groups:*`. Either switch to basic auth (set `artifactory.username` and `artifactory.password`), or mint an `applied-permissions/admin`-scoped token through the Artifactory UI and put it in `artifactory.token`.
+**`401` on `/api/export/system` or `/api/import/repositories`.** Your token's subject is not an admin user. Mint an admin-scoped token (`applied-permissions/admin`, or any token whose subject has admin rights) through the Artifactory UI and put it in `artifactory.token`, or fall back to basic auth with an admin account (`artifactory.username` / `artifactory.password`).
 
 **Sender's snapshot count is always 0.** Either (a) the export path isn't being read at the right subdirectory; Artifactory writes the export tree into a nested `<timestamp>/` subdir inside the path you give it, and the sender descends into this automatically; or (b) the metadata file isn't named `artifactory-file.xml` on your Artifactory version. The parser is `src/artifactory_airlift/export_unpacker.py:_parse_fileinfo`.
 
@@ -264,7 +265,6 @@ kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- rm -f /var
 ## TODO
 
 - **Create destination repositories.** They must currently be created manually; this will require additional API permissions and metadata.
-- **Authentication should avoid username/password.** Test bearer auth and find a better pattern.
 - **Metadata snapshot de-duplication.** Metadata exports should be ignored if there are no differences, to reduce unnecessary retention.
 - **Hooks for external alerting.** On partial and full failures you are gonna wanna know
 - **Periodic full-state archives.** Add a cadence (every N cycles, or on a cron) where the sender emits a full snapshot as `added=[everything]` with an authoritative flag, so the receiver can resync from any gap shorter than the interval. Without this, a lost archive leaves both adds and deletes unreplayed for as long as the source state is unchanged.
