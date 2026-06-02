@@ -40,6 +40,10 @@ cycleSeconds: 300
 historyKeep: 24
 doneKeepHours: 72
 
+# Optional sender allowlist. Empty syncs all repos; when set, only these
+# repo keys are synced (system/BuildInfo repos are still excluded on top).
+includedRepos: []
+
 # Sender chunking + spool backpressure.
 #
 # maxArchiveBytes splits one cycle's diff into multiple archives whose

@@ -136,7 +136,17 @@ class Settings(BaseSettings):
         default_factory=lambda: ["BuildInfo"]
     )
 
-    @field_validator("excluded_repos", "excluded_package_types", mode="before")
+    # Optional allowlist. When non-empty, only these repo keys enter the
+    # snapshot (and so the diff, archive, and receiver import). Empty
+    # (default) syncs every repo. The exclusion filters above still apply on
+    # top: a repo is synced only if it is in included_repos AND not excluded,
+    # so BuildInfo/system repos stay out even if one is listed here.
+    #   AIRLIFT_INCLUDED_REPOS=foo,bar
+    included_repos: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    @field_validator(
+        "excluded_repos", "excluded_package_types", "included_repos", mode="before"
+    )
     @classmethod
     def _split_csv(cls, v):
         # Env vars arrive as raw strings; accept comma-separated values

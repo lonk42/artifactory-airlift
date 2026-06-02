@@ -129,6 +129,7 @@ def iter_artifacts(
     export_root: Path,
     *,
     excluded_repos: set[str] | None = None,
+    included_repos: set[str] | None = None,
 ) -> Iterator[ArtifactEntry]:
     """Walk a system-export directory tree and yield one entry per artifact.
 
@@ -139,6 +140,12 @@ def iter_artifacts(
     Repo directories whose name is in ``excluded_repos`` are skipped wholesale
     (no entries yielded). Used to drop JFrog system repos like
     ``artifactory-build-info`` that fail to import on the destination.
+
+    If ``included_repos`` is non-empty it acts as an allowlist: only repos
+    whose name is in the set are walked. An empty/``None`` set means no
+    allowlist (every repo is eligible). The allowlist is applied first, then
+    the exclusion denylist, so a repo is yielded only when it is allowlisted
+    AND not excluded.
     """
     repos_root = export_root / "repositories"
     if not repos_root.is_dir():
@@ -148,6 +155,9 @@ def iter_artifacts(
     excluded = excluded_repos or set()
     for repo_dir in sorted(p for p in repos_root.iterdir() if p.is_dir()):
         repo_key = repo_dir.name
+        if included_repos and repo_key not in included_repos:
+            logger.debug("export.repo_not_in_allowlist", repo=repo_key)
+            continue
         if repo_key in excluded:
             logger.debug("export.repo_excluded", repo=repo_key)
             continue
@@ -206,10 +216,17 @@ def write_snapshot(
     snapshot_path: Path,
     *,
     excluded_repos: set[str] | None = None,
+    included_repos: set[str] | None = None,
 ) -> int:
     """Write a sorted JSONL snapshot for the given export. Returns count."""
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    entries = list(iter_artifacts(export_root, excluded_repos=excluded_repos))
+    entries = list(
+        iter_artifacts(
+            export_root,
+            excluded_repos=excluded_repos,
+            included_repos=included_repos,
+        )
+    )
     entries.sort(key=lambda e: e.sha1)
     tmp = snapshot_path.with_suffix(snapshot_path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:

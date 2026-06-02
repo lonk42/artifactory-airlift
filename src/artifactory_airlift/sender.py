@@ -127,9 +127,20 @@ def _cycle(
             repos=sorted(excluded),
             count=len(excluded),
         )
+    included = set(settings.included_repos)
+    if included:
+        logger.info(
+            "sender.repos_included",
+            cycle_id=cycle_id,
+            repos=sorted(included),
+            count=len(included),
+        )
     snapshot_path = snapshots_dir / f"{cycle_id}.jsonl"
     count = export_unpacker.write_snapshot(
-        export_contents, snapshot_path, excluded_repos=excluded
+        export_contents,
+        snapshot_path,
+        excluded_repos=excluded,
+        included_repos=included,
     )
     snapshot_repo_counts = _count_snapshot_repos(snapshot_path)
     logger.info(

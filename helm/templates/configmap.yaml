@@ -16,6 +16,7 @@ data:
     cycle_seconds: {{ .Values.cycleSeconds }}
     history_keep: {{ .Values.historyKeep }}
     done_keep_hours: {{ .Values.doneKeepHours }}
+    included_repos: {{ .Values.includedRepos | toJson }}
     max_archive_bytes: {{ .Values.maxArchiveBytes | quote }}
     spool_min_free_bytes: {{ .Values.spoolMinFreeBytes | quote }}
     snapshot_retention_hours: {{ .Values.snapshotRetentionHours }}

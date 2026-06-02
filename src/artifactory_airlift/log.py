@@ -39,6 +39,7 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "sender.cycle_skipped_pending": "Skipping cycle: {pending_count} archive(s) still in spool awaiting transport.",
     "sender.startup_sweep": "Startup sweep: removed {partials_removed} orphan .partial file(s) and {staging_dirs_removed} staging dir(s).",
     "sender.repos_excluded": "Excluding {count} repo(s) from sync: {repos}",
+    "sender.repos_included": "Allowlist active: syncing only {count} repo(s): {repos}",
     "sender.list_repositories_failed": "Could not list repositories for packageType filter ({error}); falling back to name-only exclusion.",
     "sender.snapshot_written": "Snapshot written: {count} artifacts across {repo_count} repos.",
     "sender.per_repo_counts": "Per-repo counts on source: {summary}",

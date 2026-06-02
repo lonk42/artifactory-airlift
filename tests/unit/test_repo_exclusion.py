@@ -35,6 +35,17 @@ def test_env_override_parses_comma_separated(monkeypatch) -> None:
     assert s.excluded_package_types == ["BuildInfo", "Generic"]
 
 
+def test_included_repos_defaults_to_empty() -> None:
+    s = _settings()
+    assert s.included_repos == []
+
+
+def test_env_override_parses_included_repos(monkeypatch) -> None:
+    monkeypatch.setenv("AIRLIFT_INCLUDED_REPOS", "foo, bar ,baz")
+    s = Settings()
+    assert s.included_repos == ["foo", "bar", "baz"]
+
+
 def test_resolve_excludes_by_package_type() -> None:
     s = _settings(excluded_repos=["jfrog-usage-logs"])
     client = _FakeClient(

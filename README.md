@@ -179,6 +179,33 @@ The sender also enforces a **"one delta in flight" gate** at the start of every 
 
 `spool_min_free_bytes` (default `2Gi`, same quantity syntax) is the per-chunk safety threshold and remains as defence-in-depth. Before each chunk build the sender requires `free_space(spool) >= spool_min_free_bytes + projected_chunk_bytes` (projection = raw blob sum + 256 MiB framing/metadata overhead). When the check fails, the sender logs `sender.spool_backpressure`, removes any partial chunks already on disk for the in-flight parent, and returns without advancing the cursor. The next cycle re-emits the same diff against the same snapshot baseline, so backpressure produces clean repeatable abort cycles instead of half-shipped chunk sets. Operator action when this fires: grow the spool PVC, lower `max_archive_bytes`, or wait for the transport to drain pending archives. The retry cadence is just `cycle_seconds`; there is no separate retry knob.
 
+### Repo allowlist
+
+By default the sender mirrors every repo on the source (less the JFrog
+system/BuildInfo repos it always drops). To cherry-pick a subset instead, set
+`included_repos` to a comma-separated list of repo keys; only those repos then
+enter the snapshot, diff, archive, and the receiver's import path. An empty
+list (the default) means sync everything, so existing deployments are
+unaffected.
+
+The allowlist narrows; it does not override the exclusions. A repo is synced
+only when it is listed in `included_repos` **and** not caught by the
+`excluded_repos` / `excluded_package_types` denylists, so listing a system repo
+here will not force it through. Filtering happens at snapshot time on the
+sender, so the receiver needs no configuration.
+
+Set it via the env var on the sidecar (`AIRLIFT_INCLUDED_REPOS=foo,bar`) or
+declaratively through the Helm `includedRepos` value:
+
+```yaml
+includedRepos:
+  - airlift-rpm-local
+  - airlift-npm-local
+```
+
+Watch the sender log for `Allowlist active: syncing only N repo(s): [...]` at
+cycle start to confirm it is in effect.
+
 | Key (yaml)              | Env                              | Default                                                  | Description                                                                                                                  |
 | ----------------------- | -------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `mode`                  | `AIRLIFT_MODE`                   | `sender`                                                 | Which loop to run: `sender` exports + diffs + spools archives; `receiver` ingests archives + writes blobs + imports repos.   |
@@ -189,6 +216,7 @@ The sender also enforces a **"one delta in flight" gate** at the start of every 
 | `artifactory_password`  | `AIRLIFT_ARTIFACTORY_PASSWORD`   | `""`                                                     | Admin password paired with `artifactory_username`. Inject via a Secret; the chart writes this into `artifactory-airlift-token`.|
 | `cycle_seconds`         | `AIRLIFT_CYCLE_SECONDS`          | `300`                                                    | Seconds between cycles. Sender: time between exports/diffs. Receiver: poll interval for new archives in the spool dir.       |
 | `propagate_deletes`     | `AIRLIFT_PROPAGATE_DELETES`      | `true`                                                   | Sender-only. When true, each cycle's manifest includes a `removed[]` list of artifacts present in the previous snapshot but absent from the current one; the receiver issues `DELETE` calls to converge. Cold-start cycles (no previous snapshot) skip removal emission. Set false to fall back to additive-only behaviour. |
+| `included_repos`        | `AIRLIFT_INCLUDED_REPOS`         | `[]` (all repos)                                         | Sender-only allowlist. Comma-separated repo keys; when empty every repo is synced. When set, only the listed repos enter the snapshot, diff, and archive. The system-repo exclusions still apply on top, so a repo syncs only if it is listed here and not excluded. |
 | `history_keep`          | `AIRLIFT_HISTORY_KEEP`           | `24`                                                     | Sender-only. Number of raw export trees to retain under `state/exports/` before pruning the oldest. Snapshot baselines use the GFS retention keys below.|
 | `done_keep_hours`       | `AIRLIFT_DONE_KEEP_HOURS`        | `72`                                                     | Receiver-only. How long to retain processed archives under `spool/.done/` before deleting them. Set `0` to keep forever.     |
 | `max_archive_bytes`     | `AIRLIFT_MAX_ARCHIVE_BYTES`      | `8Gi`                                                    | Sender-only. Per-archive raw blob-byte budget. Accepts a k8s-style quantity (`8Gi`, `512Mi`, `1G`) or a plain integer. When a cycle's diff exceeds this, the diff is split into multiple archives named `<cycle_id>-cNNN.tar.zst`; only the final chunk carries the metadata tree and `removed[]`. Set `0` to disable chunking. |

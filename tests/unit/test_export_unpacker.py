@@ -87,6 +87,41 @@ def test_iter_artifacts_excluded_repos_skipped(tmp_path: Path) -> None:
     assert "artifactory-build-info" not in snap.read_text()
 
 
+def test_iter_artifacts_included_repos_allowlist(tmp_path: Path) -> None:
+    root = tmp_path / "export"
+    _meta(root / "repositories" / "keep-a" / "x.bin.artifactory-metadata", "a" * 40, 1)
+    _meta(root / "repositories" / "keep-b" / "y.bin.artifactory-metadata", "b" * 40, 1)
+    _meta(root / "repositories" / "drop-me" / "z.bin.artifactory-metadata", "c" * 40, 1)
+
+    included = {"keep-a", "keep-b"}
+    entries = list(export_unpacker.iter_artifacts(root, included_repos=included))
+    assert sorted(e.repo_key for e in entries) == ["keep-a", "keep-b"]
+
+    # An empty/None allowlist means no filtering (every repo eligible).
+    all_entries = list(export_unpacker.iter_artifacts(root, included_repos=set()))
+    assert sorted(e.repo_key for e in all_entries) == ["drop-me", "keep-a", "keep-b"]
+
+    # write_snapshot must forward the filter end-to-end.
+    snap = tmp_path / "snap.jsonl"
+    count = export_unpacker.write_snapshot(root, snap, included_repos=included)
+    assert count == 2
+    assert "drop-me" not in snap.read_text()
+
+
+def test_iter_artifacts_allowlist_and_exclusion_combine(tmp_path: Path) -> None:
+    # A repo in both lists is dropped: allowlist narrows, exclusion still wins.
+    root = tmp_path / "export"
+    _meta(root / "repositories" / "keep" / "x.bin.artifactory-metadata", "a" * 40, 1)
+    _meta(root / "repositories" / "both" / "y.bin.artifactory-metadata", "b" * 40, 1)
+
+    entries = list(
+        export_unpacker.iter_artifacts(
+            root, included_repos={"keep", "both"}, excluded_repos={"both"}
+        )
+    )
+    assert [e.repo_key for e in entries] == ["keep"]
+
+
 def test_write_snapshot_sorted_by_sha1(tmp_path: Path) -> None:
     root = tmp_path / "export"
     _meta(root / "repositories" / "r" / "z.bin.artifactory-metadata", "b" * 40, 1)
