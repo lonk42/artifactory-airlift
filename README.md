@@ -4,7 +4,7 @@ One-way, delta-only sync designed for air-gapped JFrog Artifactory Kubernetes im
 
 Unlike Artifactory's existing [import/export API](https://docs.jfrog.com/installation/docs/import-and-export) workflow, in sending mode Airlift uses the [system export API](https://docs.jfrog.com/artifactory/reference/exportsystem) to generate deltas from the binarystore metadata DB. From these deltas Airlift generates manifests, and writes a per-cycle archive containing only the new blobs plus the metadata needed to import them. In receiving mode, Airlift ingests these archives and uses a combination of Artifactory's repository import API and atomic file operations to link them. Airlift does not provide a transport mechanism between sidecars.
 
-Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 to match the artifactory user.
+Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 by default to match the artifactory user; platforms that assign arbitrary UIDs are also supported, see [Restricted security contexts](#restricted-security-contexts).
 
 ## Architecture
 
@@ -35,7 +35,7 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 to match th
 1. List `spool/*.tar.zst` in lexical (and time) order.
 2. Skip any cycle_id already present in `state/processed.jsonl`.
 3. Extract the next archive to `state/import/<cycle_id>/` (must be on the state PVC, not under the artifactory data dir; the import API rejects paths under `/var/opt/jfrog/artifactory/...`).
-4. Stream each blob from `blobs/<aa>/<sha1>` into `<FILESTORE_ROOT>/<aa>/<sha1>.tmp-<pid>`, `fsync`, `rename`, `chown 1030:1030`, `chmod 0640`. Existing sha1s are skipped (filestore is content-addressed and idempotent).
+4. Stream each blob from `blobs/<aa>/<sha1>` into `<FILESTORE_ROOT>/<aa>/<sha1>.tmp-<pid>`, `fsync`, `rename`, `chown` to `artifactory_uid:artifactory_gid` (skipped when the process lacks permission, e.g. when running under an arbitrary UID), `chmod 0640`. Existing sha1s are skipped (filestore is content-addressed and idempotent).
 5. `POST /api/import/repositories?path=<extract_dir>/metadata/repositories&verbose=1`. Artifactory returns 200 even when individual repos fail; the receiver scans the verbose response body for `500 :`, `400 :`, `404 :`, and `Error` lines and records them as per-repo failures.
 6. For each record in the manifest's `removed[]`, issue `DELETE /<repo>/<path>` against the destination. A 404 is treated as success (the artifact is already gone, which is the desired state) but recorded in `delete_failures[]`. Imports run before deletions so a sha1 that both moved away from one path and reappeared at another in the same cycle survives.
 7. Append `{cycle_id, status, blob_count, total_bytes, repos, failures, deleted_count, delete_failures, processed_at}` to `state/processed.jsonl` and move the archive to `spool/.done/`. For chunked cycles, non-final chunks record `status: "blob-staged"` and skip the import and delete steps; the final chunk waits in spool until every earlier chunk for the same `parent_cycle_id` has been recorded, then runs import and deletes against the now-complete blob set.
@@ -51,7 +51,7 @@ src/artifactory_airlift/    Python package (sender + receiver share the same ima
 helm/                       ConfigMap + Secret + state/spool PVCs (does NOT deploy the sidecar)
 tests/unit/                 offline unit tests
 tests/e2e/                  live-cluster tests, gated on E2E=1
-Dockerfile                  multi-stage build, runs as uid 1030
+Dockerfile                  multi-stage build, runs as uid 1030 (arbitrary-UID safe)
 ```
 
 `AIRLIFT_MODE=sender|receiver` selects behaviour. Both sides run the same image.
@@ -122,6 +122,8 @@ artifactory:
           - { name: airlift-spool, mountPath: /var/airlift/spool }
           - { name: airlift-config, mountPath: /etc/airlift }
           - { name: artifactory-volume, mountPath: /var/opt/jfrog/artifactory }
+        # Omit this if your platform assigns container UIDs itself; see
+        # the restricted security contexts section below.
         securityContext: { runAsUser: 1030, runAsGroup: 1030 }
 ```
 
@@ -138,6 +140,16 @@ TODO: This is in-scope for a future feature
 ### 4. Transport
 
 The sender writes finalised archives to `/var/airlift/spool/*.tar.zst`. The receiver reads from the same path on its side. Moving archives between the two PVCs is **not** in scope. (For testing use manual `kubectl cp`). The archives are content-addressed and idempotent; replay is safe.
+
+## Restricted security contexts
+
+Some Kubernetes distributions enforce an admission policy that rejects pods pinning `runAsUser` to a UID outside a per-namespace allowed range, and instead assign each container an arbitrary non-root UID with GID 0. On those platforms the `runAsUser: 1030` in the sidecar snippet above fails admission. To run under a platform-assigned UID:
+
+- **Drop the `securityContext` from the sidecar block** (if you template the snippet from this chart, set `sidecar.securityContext: null` in the values, or pass `--set sidecar.securityContext=null`; an empty map `{}` would merge with the chart defaults rather than clear them). The platform then assigns the sidecar an arbitrary non-root UID with GID 0; the image's writable directories are group-0 owned, so this works without further changes.
+- **Unset the uid/gid pins in the jfrog/artifactory chart too.** That chart also defaults to uid/gid 1030 in its pod `securityContext`. With both unset, both containers in the pod run as the same assigned UID, so filestore blobs written by either side stay readable by the other, and volume permissions are handled by the assigned `fsGroup`.
+- **No airlift config changes are needed.** The receiver's chown-to-`artifactory_uid` is skipped automatically when the process lacks permission (logged at debug as `filestore.chown_skipped`); blobs end up owned by the pod's assigned UID, which is the UID Artifactory itself runs as.
+
+Alternatively, if your platform can grant the workload an exemption that admits pinned non-root UIDs, you can keep uid/gid 1030 on both containers as-is. The unpinned route above is recommended since it needs no extra privileges.
 
 ## Authentication
 
@@ -228,7 +240,7 @@ cycle start to confirm it is in effect.
 | `artifactory_tmp`       | `AIRLIFT_ARTIFACTORY_TMP`        | `/var/opt/jfrog/artifactory/data/artifactory/tmp`        | Artifactory's tmp dir. Reserved for future use; currently informational.                                                     |
 | `state_dir`             | `AIRLIFT_STATE_DIR`              | `/var/airlift/state`                                     | Durable per-side state (snapshots, cursor, processed ledger, lockfile, extracted import trees). Must be on a PVC.            |
 | `spool_dir`             | `AIRLIFT_SPOOL_DIR`              | `/var/airlift/spool`                                     | Where finalised `*.tar.zst` archives land (sender) and where they're picked up from (receiver). Never NFS; tearing on fsync. |
-| `artifactory_uid`       | `AIRLIFT_ARTIFACTORY_UID`        | `1030`                                                   | UID the receiver chowns blobs to when placing them in the filestore. Must match the artifactory process's UID.               |
+| `artifactory_uid`       | `AIRLIFT_ARTIFACTORY_UID`        | `1030`                                                   | UID the receiver chowns blobs to when placing them in the filestore. Must match the artifactory process's UID. The chown is skipped (debug log `filestore.chown_skipped`) when the process lacks permission, as under platform-assigned arbitrary UIDs. |
 | `artifactory_gid`       | `AIRLIFT_ARTIFACTORY_GID`        | `1030`                                                   | GID counterpart of `artifactory_uid`.                                                                                        |
 | `log_level`             | `AIRLIFT_LOG_LEVEL`              | `INFO`                                                   | Structlog level: `DEBUG`, `INFO`, `WARNING`, `ERROR`.                                                                        |
 | `log_format` (env only) | `AIRLIFT_LOG_FORMAT`             | `console`                                                | `console` emits one human-readable line per event (`YYYY-MM-DD HH:MM:SS LEVEL component cycle=… message [k=v …]`). Set to `json` for the original structlog JSON output. |

@@ -55,9 +55,10 @@ namespace (under `artifactory.artifactory`):
               mountPath: {{ .Values.paths.configMount }}
             - name: artifactory-volume
               mountPath: /var/opt/jfrog/artifactory
+{{- with .Values.sidecar.securityContext }}
           securityContext:
-            runAsUser: 1030
-            runAsGroup: 1030
+            {{- toYaml . | nindent 12 }}
+{{- end }}
 
 Install this chart twice (once per Artifactory instance) with
 `mode: sender` on the source side and `mode: receiver` on the

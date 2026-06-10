@@ -76,6 +76,18 @@ snapshotRetentionMonths: 0
 
 logLevel: INFO
 
+# Security context rendered into the sidecar snippet in NOTES.txt. The
+# default pins the uid/gid the jfrog/artifactory chart runs Artifactory
+# as, so blobs the receiver writes match the filestore ownership. If
+# your platform rejects pinned UIDs and assigns an arbitrary non-root
+# UID instead, set this to null (an empty map {} would merge with the
+# defaults rather than clear them). See the "Restricted security
+# contexts" section in the README.
+sidecar:
+  securityContext:
+    runAsUser: 1030
+    runAsGroup: 1030
+
 # Storage.
 state:
   size: 1Gi
