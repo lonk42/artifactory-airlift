@@ -92,6 +92,21 @@ helm install artifactory-airlift ./helm \
   --set artifactory.token=<admin-scoped-access-token>
 ```
 
+The chart is also published as an OCI artifact, so you can install it without
+cloning this repo by swapping `./helm` for the registry reference and pinning a
+`--version`:
+
+```sh
+helm install artifactory-airlift oci://ghcr.io/lonk42/artifactory-airlift \
+  --version <chart-version> \
+  --namespace <source-namespace> \
+  --set mode=sender \
+  --set instanceName=<source-name> \
+  --set image.repository=<your-registry>/artifactory-airlift \
+  --set image.tag=<version> \
+  --set artifactory.token=<admin-scoped-access-token>
+```
+
 ### 2. Inject the sidecar into the artifactory pod
 
 Add the following to the jfrog/artifactory Helm values for each instance, under `artifactory.artifactory.*`. `helm template ./helm | grep -A1 'NOTES'` prints the same block ready to paste; the values referenced below come from this chart's defaults.
@@ -140,6 +155,43 @@ TODO: This is in-scope for a future feature
 ### 4. Transport
 
 The sender writes finalised archives to `/var/airlift/spool/*.tar.zst`. The receiver reads from the same path on its side. Moving archives between the two PVCs is **not** in scope. (For testing use manual `kubectl cp`). The archives are content-addressed and idempotent; replay is safe.
+
+## Consuming the chart as a dependency (umbrella chart / ArgoCD)
+
+Because the chart is published to OCI (see the install-from-OCI note in step 1), you can pull it in as a subchart of your own umbrella chart rather than installing it standalone. This is the tidiest way to deploy airlift alongside Artifactory through ArgoCD: a Helm `dependencies:` entry can point at an HTTP Helm repo, an `oci://` reference, or a local `file://` path, but it cannot reference a git repo + path, which is why the chart needs to be published.
+
+Declare both Artifactory and airlift as dependencies in a wrapper `Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: artifactory-stack
+version: 0.1.0
+dependencies:
+  - name: artifactory
+    version: "<jfrog chart version>"
+    repository: https://charts.jfrog.io
+  - name: artifactory-airlift
+    version: "<chart-version>"
+    repository: oci://ghcr.io/lonk42
+```
+
+Run `helm dependency update` to vendor the charts. In the umbrella `values.yaml`, airlift's values are namespaced under the subchart key (`artifactory-airlift:`) and the jfrog `customSidecarContainers` block goes under `artifactory:` exactly as in step 2 above. The sidecar block references the airlift resource names (the ConfigMap, Secret, and PVCs), which stay stable when the chart is rendered as a subchart.
+
+Point a single ArgoCD `Application` at the umbrella chart in your gitops repo. `repoURL` + `path` is valid here because the umbrella chart is git-hosted; airlift is resolved as an OCI dependency by the repo-server during `helm dependency build`, so it does not need its own Application:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  source:
+    repoURL: https://github.com/<you>/<gitops>
+    path: charts/artifactory-stack
+    targetRevision: main
+    helm:
+      valueFiles: [values.yaml]
+```
+
+ArgoCD must have OCI Helm support enabled (the default in recent 2.x releases); if you make the chart package private, register `ghcr.io` as an OCI-enabled Helm repository credential in ArgoCD so the repo-server can pull it. If you would rather not maintain a wrapper chart, an ArgoCD multi-source `Application` is an alternative: one source is the airlift chart from `oci://ghcr.io/lonk42` and another is a git-hosted values file that overrides it.
 
 ## Restricted security contexts
 

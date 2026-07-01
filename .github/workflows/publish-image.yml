@@ -1,9 +1,11 @@
-name: Build and publish image
+name: Build and publish image and chart
 
-# Builds the container image and pushes it to GitHub Container Registry
-# (ghcr.io) whenever a release tag is pushed. Tags of the form "v1.2.3" or
-# bare semver "1.2.3" are both accepted; the leading "v" is stripped from
-# the resulting image tags by the metadata step.
+# Builds the container image and packages the Helm chart, pushing both to
+# GitHub Container Registry (ghcr.io) whenever a release tag is pushed. Tags
+# of the form "v1.2.3" or bare semver "1.2.3" are both accepted; the leading
+# "v" is stripped from the resulting image tags by the metadata step. The
+# chart is pushed as an OCI artifact to oci://ghcr.io/<owner>, tagged with the
+# version in helm/Chart.yaml (kept in lockstep with the image tag).
 on:
   push:
     tags:
@@ -53,3 +55,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to ghcr for Helm (OCI)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package and push chart
+        run: |
+          helm package helm/ --destination "${RUNNER_TEMP}/chart"
+          helm push "${RUNNER_TEMP}"/chart/artifactory-airlift-*.tgz oci://ghcr.io/${{ github.repository_owner }}
