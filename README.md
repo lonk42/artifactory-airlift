@@ -97,7 +97,7 @@ cloning this repo by swapping `./helm` for the registry reference and pinning a
 `--version`:
 
 ```sh
-helm install artifactory-airlift oci://ghcr.io/lonk42/artifactory-airlift \
+helm install artifactory-airlift oci://ghcr.io/lonk42/charts/artifactory-airlift \
   --version <chart-version> \
   --namespace <source-namespace> \
   --set mode=sender \
@@ -172,7 +172,7 @@ dependencies:
     repository: https://charts.jfrog.io
   - name: artifactory-airlift
     version: "<chart-version>"
-    repository: oci://ghcr.io/lonk42
+    repository: oci://ghcr.io/lonk42/charts
 ```
 
 Run `helm dependency update` to vendor the charts. In the umbrella `values.yaml`, airlift's values are namespaced under the subchart key (`artifactory-airlift:`) and the jfrog `customSidecarContainers` block goes under `artifactory:` exactly as in step 2 above. The sidecar block references the airlift resource names (the ConfigMap, Secret, and PVCs), which stay stable when the chart is rendered as a subchart.
@@ -191,7 +191,7 @@ spec:
       valueFiles: [values.yaml]
 ```
 
-ArgoCD must have OCI Helm support enabled (the default in recent 2.x releases); if you make the chart package private, register `ghcr.io` as an OCI-enabled Helm repository credential in ArgoCD so the repo-server can pull it. If you would rather not maintain a wrapper chart, an ArgoCD multi-source `Application` is an alternative: one source is the airlift chart from `oci://ghcr.io/lonk42` and another is a git-hosted values file that overrides it.
+ArgoCD must have OCI Helm support enabled (the default in recent 2.x releases); if you make the chart package private, register `ghcr.io` as an OCI-enabled Helm repository credential in ArgoCD so the repo-server can pull it. If you would rather not maintain a wrapper chart, an ArgoCD multi-source `Application` is an alternative: one source is the airlift chart from `oci://ghcr.io/lonk42/charts` and another is a git-hosted values file that overrides it.
 
 ## Restricted security contexts
 

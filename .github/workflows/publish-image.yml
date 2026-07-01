@@ -4,8 +4,9 @@ name: Build and publish image and chart
 # GitHub Container Registry (ghcr.io) whenever a release tag is pushed. Tags
 # of the form "v1.2.3" or bare semver "1.2.3" are both accepted; the leading
 # "v" is stripped from the resulting image tags by the metadata step. The
-# chart is pushed as an OCI artifact to oci://ghcr.io/<owner>, tagged with the
-# version in helm/Chart.yaml (kept in lockstep with the image tag).
+# chart is pushed as an OCI artifact to oci://ghcr.io/<owner>/charts (a separate
+# repository path from the image so their tag namespaces do not collide),
+# tagged with the version in helm/Chart.yaml (kept in lockstep with the image tag).
 on:
   push:
     tags:
@@ -65,4 +66,4 @@ jobs:
       - name: Package and push chart
         run: |
           helm package helm/ --destination "${RUNNER_TEMP}/chart"
-          helm push "${RUNNER_TEMP}"/chart/artifactory-airlift-*.tgz oci://ghcr.io/${{ github.repository_owner }}
+          helm push "${RUNNER_TEMP}"/chart/artifactory-airlift-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
