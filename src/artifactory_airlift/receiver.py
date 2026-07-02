@@ -61,12 +61,7 @@ def _loop(
     processed_path: Path,
     done_dir: Path,
 ) -> int:
-    client = ArtifactoryClient(
-        settings.artifactory_url,
-        settings.artifactory_token,
-        username=settings.artifactory_username,
-        password=settings.artifactory_password,
-    )
+    client = ArtifactoryClient.from_settings(settings)
     try:
         while True:
             try:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from .config import Settings
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -24,6 +27,23 @@ _RETRY = dict(
 
 
 class ArtifactoryClient:
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "ArtifactoryClient":
+        """Build a client from Settings, resolving the TLS verify target.
+
+        When ``artifactory_ca_cert`` is set it becomes the httpx ``verify``
+        value (a path to a PEM CA bundle used to trust a private/self-signed
+        CA); otherwise verification uses httpx's bundled certifi store.
+        """
+        verify: bool | str = settings.artifactory_ca_cert or True
+        return cls(
+            settings.artifactory_url,
+            settings.artifactory_token,
+            username=settings.artifactory_username,
+            password=settings.artifactory_password,
+            verify=verify,
+        )
+
     def __init__(
         self,
         base_url: str,
@@ -32,6 +52,7 @@ class ArtifactoryClient:
         username: str = "",
         password: str = "",
         timeout: float = 60.0,
+        verify: bool | str = True,
     ):
         if base_url.endswith("/"):
             base_url = base_url[:-1]
@@ -47,8 +68,12 @@ class ArtifactoryClient:
         elif token:
             headers["Authorization"] = f"Bearer {token}"
         # Separate clients: a long-poll one for export, normal one for everything else.
-        self._http = httpx.Client(headers=headers, auth=auth, timeout=timeout)
-        self._http_long = httpx.Client(headers=headers, auth=auth, timeout=None)
+        self._http = httpx.Client(
+            headers=headers, auth=auth, timeout=timeout, verify=verify
+        )
+        self._http_long = httpx.Client(
+            headers=headers, auth=auth, timeout=None, verify=verify
+        )
 
     def close(self) -> None:
         self._http.close()

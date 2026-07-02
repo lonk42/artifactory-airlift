@@ -217,6 +217,12 @@ The Helm chart writes the credentials into a Kubernetes Secret named `artifactor
 
 > Every env var the sidecar consumes starts with `AIRLIFT_`. Bare `ARTIFACTORY_TOKEN` etc. are silently ignored; Pydantic Settings uses `env_prefix="AIRLIFT_"`.
 
+### Trusting a private CA
+
+When Airlift talks to Artifactory over HTTPS with a certificate issued by a private or self-signed CA, hand it the CA to trust. Airlift's HTTP client uses the bundled certifi CA store and does not read `SSL_CERT_FILE` / `SSL_CERT_DIR`, so the CA has to be named explicitly: set `artifactory_ca_cert` (env `AIRLIFT_ARTIFACTORY_CA_CERT`) to the path of a single concatenated PEM bundle file (not a directory) that the container can read.
+
+CA material is public, so the idiomatic home for it on Kubernetes is a ConfigMap; many clusters already expose one (for example the per-namespace `kube-root-ca.crt`, a platform-injected trusted-CA bundle, or a cert-manager trust-manager `Bundle`). Reference it via the chart's `artifactory.caCert.existingConfigMap` (with `key` and `mountPath`); the chart mounts that ConfigMap into the sidecar and points `AIRLIFT_ARTIFACTORY_CA_CERT` at the mounted file for you. The chart does not create the ConfigMap. Leave `existingConfigMap` empty to use the default trust store.
+
 ## Configuration reference
 
 The sidecar reads `/etc/airlift/config.yaml` from the mounted ConfigMap and overlays env vars prefixed `AIRLIFT_`. All keys are optional except auth.
@@ -278,6 +284,7 @@ cycle start to confirm it is in effect.
 | `artifactory_token`     | `AIRLIFT_ARTIFACTORY_TOKEN`      | `""`                                                     | Bearer access token. Use an admin-scoped token (subject is an admin user); it authorises every endpoint airlift calls, including `/api/export/system` and `/api/import/repositories`. Ignored when basic auth is set.|
 | `artifactory_username`  | `AIRLIFT_ARTIFACTORY_USERNAME`   | `""`                                                     | Admin username for basic auth. When both username and password are set, basic auth takes precedence over `artifactory_token`.|
 | `artifactory_password`  | `AIRLIFT_ARTIFACTORY_PASSWORD`   | `""`                                                     | Admin password paired with `artifactory_username`. Inject via a Secret; the chart writes this into `artifactory-airlift-token`.|
+| `artifactory_ca_cert`   | `AIRLIFT_ARTIFACTORY_CA_CERT`    | `""`                                                     | Path to a single PEM CA bundle file used to verify Artifactory's TLS certificate. Empty uses the bundled certifi store. Set it to trust a private/self-signed CA; the HTTP client does not read `SSL_CERT_FILE`, so the CA must be named here and the file mounted into the container. See "Trusting a private CA".|
 | `cycle_seconds`         | `AIRLIFT_CYCLE_SECONDS`          | `300`                                                    | Seconds between cycles. Sender: time between exports/diffs. Receiver: poll interval for new archives in the spool dir.       |
 | `propagate_deletes`     | `AIRLIFT_PROPAGATE_DELETES`      | `true`                                                   | Sender-only. When true, each cycle's manifest includes a `removed[]` list of artifacts present in the previous snapshot but absent from the current one; the receiver issues `DELETE` calls to converge. Cold-start cycles (no previous snapshot) skip removal emission. Set false to fall back to additive-only behaviour. |
 | `included_repos`        | `AIRLIFT_INCLUDED_REPOS`         | `[]` (all repos)                                         | Sender-only allowlist. Comma-separated repo keys; when empty every repo is synced. When set, only the listed repos enter the snapshot, diff, and archive. The system-repo exclusions still apply on top, so a repo syncs only if it is listed here and not excluded. |

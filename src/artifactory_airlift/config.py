@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     artifactory_username: str = ""
     artifactory_password: str = ""
 
+    # Path to a PEM CA bundle file used to verify the Artifactory TLS
+    # certificate. Empty (default) uses the certifi CA store bundled with
+    # httpx. Set this when Artifactory presents a certificate from a
+    # private/self-signed CA; httpx does not read SSL_CERT_FILE/SSL_CERT_DIR,
+    # so the CA must be named here explicitly. Must be a single concatenated
+    # PEM file, not a directory (httpx/ssl wants a bundle file, not a CApath).
+    artifactory_ca_cert: str = ""
+
     filestore_root: Path = Path("/var/opt/jfrog/artifactory/data/artifactory/filestore")
     artifactory_tmp: Path = Path("/var/opt/jfrog/artifactory/data/artifactory/tmp")
 

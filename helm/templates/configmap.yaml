@@ -9,6 +9,9 @@ data:
     mode: {{ .Values.mode | quote }}
     instance_name: {{ .Values.instanceName | quote }}
     artifactory_url: {{ .Values.artifactory.url | quote }}
+    {{- if .Values.artifactory.caCert.existingConfigMap }}
+    artifactory_ca_cert: {{ printf "%s/%s" .Values.artifactory.caCert.mountPath .Values.artifactory.caCert.key | quote }}
+    {{- end }}
     filestore_root: {{ .Values.paths.filestoreRoot | quote }}
     artifactory_tmp: {{ .Values.paths.artifactoryTmp | quote }}
     state_dir: {{ .Values.paths.stateMount | quote }}

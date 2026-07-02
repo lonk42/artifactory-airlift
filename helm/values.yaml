@@ -35,6 +35,20 @@ artifactory:
   password: ""
   existingSecret: ""   # if set, must contain keys: token, username, password
 
+  # Trust a private/self-signed CA for the Artifactory TLS certificate.
+  # Only needed when the url above is https with a CA that the bundled
+  # certifi store does not know. Point at an existing ConfigMap that holds
+  # the CA bundle (CA material is public, so a ConfigMap is the idiomatic
+  # home; e.g. the namespace's kube-root-ca.crt, an injected
+  # trusted-CA-bundle, or a cert-manager trust-manager Bundle). The chart
+  # does not create the ConfigMap; it only references and mounts it, then
+  # sets AIRLIFT_ARTIFACTORY_CA_CERT to the mounted file. Leave
+  # existingConfigMap empty to skip (uses the default certifi store).
+  caCert:
+    existingConfigMap: ""        # ConfigMap name holding the CA bundle
+    key: ca.crt                  # key/filename within it (e.g. ca-bundle.crt)
+    mountPath: /etc/airlift/ca   # where it is mounted in the sidecar
+
 # Cycle behavior.
 cycleSeconds: 300
 historyKeep: 24

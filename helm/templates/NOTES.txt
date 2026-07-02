@@ -18,6 +18,14 @@ namespace (under `artifactory.artifactory`):
         - name: airlift-config
           configMap:
             name: {{ include "airlift.configMapName" . }}
+{{- if .Values.artifactory.caCert.existingConfigMap }}
+        # CA bundle for trusting the Artifactory TLS cert. Reference an
+        # existing ConfigMap (e.g. kube-root-ca.crt, an injected
+        # trusted-CA-bundle, or a trust-manager Bundle).
+        - name: airlift-ca
+          configMap:
+            name: {{ .Values.artifactory.caCert.existingConfigMap | quote }}
+{{- end }}
       customVolumeMounts: |
         - name: airlift-state
           mountPath: {{ .Values.paths.stateMount }}
@@ -46,6 +54,10 @@ namespace (under `artifactory.artifactory`):
                 secretKeyRef:
                   name: {{ include "airlift.secretName" . }}
                   key: password
+{{- if .Values.artifactory.caCert.existingConfigMap }}
+            - name: AIRLIFT_ARTIFACTORY_CA_CERT
+              value: {{ printf "%s/%s" .Values.artifactory.caCert.mountPath .Values.artifactory.caCert.key | quote }}
+{{- end }}
           volumeMounts:
             - name: airlift-state
               mountPath: {{ .Values.paths.stateMount }}
@@ -55,6 +67,11 @@ namespace (under `artifactory.artifactory`):
               mountPath: {{ .Values.paths.configMount }}
             - name: artifactory-volume
               mountPath: /var/opt/jfrog/artifactory
+{{- if .Values.artifactory.caCert.existingConfigMap }}
+            - name: airlift-ca
+              mountPath: {{ .Values.artifactory.caCert.mountPath }}
+              readOnly: true
+{{- end }}
 {{- with .Values.sidecar.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
