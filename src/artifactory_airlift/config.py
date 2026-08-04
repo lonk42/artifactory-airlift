@@ -4,7 +4,12 @@ from typing import Annotated, Literal
 
 import yaml
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 Mode = Literal["sender", "receiver"]
 
@@ -57,6 +62,28 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Put env vars above the config file.
+
+        ``load()`` passes the parsed YAML config file in as init kwargs, and
+        init kwargs are pydantic-settings' highest-priority source by
+        default. That inverts the documented contract (the file is the base,
+        env vars overlay it) and, because the Helm chart renders every key
+        into the ConfigMap whether or not the operator set it, meant a
+        mounted ConfigMap silently masked every AIRLIFT_ env var: a chart
+        default of `included_repos: []` beat AIRLIFT_INCLUDED_REPOS. Demoting
+        init below env restores file-then-env layering.
+        """
+        return (env_settings, dotenv_settings, file_secret_settings, init_settings)
+
     mode: Mode = "sender"
     instance_name: str = "unknown"
 
@@ -64,6 +91,15 @@ class Settings(BaseSettings):
     artifactory_token: str = ""
     artifactory_username: str = ""
     artifactory_password: str = ""
+
+    # Path to a file holding the bearer access token. Unlike
+    # artifactory_token (read once at process start), this file is re-read
+    # on every HTTP request, so a token rotated in place by an external
+    # system is picked up without restarting the container. Leading and
+    # trailing whitespace is stripped, so a trailing newline (which most
+    # secret tooling adds) is harmless. Takes precedence over
+    # artifactory_token; basic auth still wins over both.
+    artifactory_token_file: str = ""
 
     # Path to a PEM CA bundle file used to verify the Artifactory TLS
     # certificate. Empty (default) uses the certifi CA store bundled with

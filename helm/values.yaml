@@ -25,7 +25,8 @@ image:
 # Mint it once via the Artifactory UI (Administration > User Management >
 # Access Tokens); it cannot be bootstrapped from username+password. Basic auth
 # takes precedence when both username and password are set, so to use the
-# token leave them empty.
+# token leave them empty. If the token is rotated in place, supply it through
+# `tokenFile` below rather than `token` here.
 artifactory:
   url: http://localhost:8081/artifactory
   # Plaintext only for bootstrap / dev. In production this should be
@@ -48,6 +49,20 @@ artifactory:
     existingConfigMap: ""        # ConfigMap name holding the CA bundle
     key: ca.crt                  # key/filename within it (e.g. ca-bundle.crt)
     mountPath: /etc/airlift/ca   # where it is mounted in the sidecar
+
+  # Read the bearer token from a mounted file instead of an env var. Airlift
+  # re-reads the file on every request, so a token rotated in place is picked
+  # up without restarting the pod. Point at an existing Secret holding the
+  # token; the chart does not create it. When existingSecret is set the chart
+  # skips its own Secret and omits the token/username/password env vars from
+  # the sidecar snippet, so the Secret needs only the one key.
+  # Keep this a directory mount, as the generated snippet does: Kubernetes
+  # never propagates updates into subPath mounts, so a subPath-mounted token
+  # would be frozen at pod start.
+  tokenFile:
+    existingSecret: ""              # Secret name holding the token
+    key: token                      # key/filename within it
+    mountPath: /etc/airlift/token   # where it is mounted in the sidecar
 
 # Cycle behavior.
 cycleSeconds: 300

@@ -26,14 +26,44 @@ _RETRY = dict(
 )
 
 
+class FileTokenAuth(httpx.Auth):
+    """Bearer auth that re-reads the token from disk on every request.
+
+    For deployments where the token is rotated in place: a Kubernetes Secret
+    refreshed by an external controller, or an agent rewriting the file. The
+    client itself lives for the whole process (one long-running loop), so a
+    token resolved at construction would go stale at the first rotation and
+    only recover on a restart. Reading inside ``auth_flow`` means each
+    request carries whatever the file holds right now, and the retry
+    decorator on the calling methods turns a mid-rotation 401 into a retry
+    with the fresh token.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def auth_flow(self, request: httpx.Request):
+        # Strip: secret tooling almost always leaves a trailing newline,
+        # which would otherwise corrupt the header value.
+        token = self.path.read_text().strip()
+        if not token:
+            raise RuntimeError(f"artifactory token file is empty: {self.path}")
+        request.headers["Authorization"] = f"Bearer {token}"
+        yield request
+
+
 class ArtifactoryClient:
     @classmethod
     def from_settings(cls, settings: "Settings") -> "ArtifactoryClient":
-        """Build a client from Settings, resolving the TLS verify target.
+        """Build a client from Settings, resolving auth and the TLS verify target.
 
         When ``artifactory_ca_cert`` is set it becomes the httpx ``verify``
         value (a path to a PEM CA bundle used to trust a private/self-signed
         CA); otherwise verification uses httpx's bundled certifi store.
+
+        ``artifactory_token_file`` selects the rotation-aware bearer auth
+        (see :class:`FileTokenAuth`) in place of the static
+        ``artifactory_token``.
         """
         verify: bool | str = settings.artifactory_ca_cert or True
         return cls(
@@ -41,6 +71,7 @@ class ArtifactoryClient:
             settings.artifactory_token,
             username=settings.artifactory_username,
             password=settings.artifactory_password,
+            token_file=settings.artifactory_token_file,
             verify=verify,
         )
 
@@ -51,6 +82,7 @@ class ArtifactoryClient:
         *,
         username: str = "",
         password: str = "",
+        token_file: str = "",
         timeout: float = 60.0,
         verify: bool | str = True,
     ):
@@ -61,10 +93,20 @@ class ArtifactoryClient:
         # precedence over bearer because in this codebase it's the
         # explicit override path; operators who want the simpler,
         # reliably-scoped path can set both and ignore the token field.
-        auth: httpx.BasicAuth | None = None
+        # A token file outranks a literal token: naming a file is the more
+        # deliberate act, and it is the only one of the two that survives
+        # rotation.
+        auth: httpx.Auth | None = None
         headers: dict[str, str] = {}
         if username and password:
             auth = httpx.BasicAuth(username, password)
+        elif token_file:
+            auth = FileTokenAuth(token_file)
+            if not Path(token_file).is_file():
+                # Not fatal: an agent may not have written it yet, and the
+                # per-request read is what actually matters. Log it so a
+                # mis-wired mount is visible without a crashloop.
+                logger.warning("artifactory.token_file_missing", path=token_file)
         elif token:
             headers["Authorization"] = f"Bearer {token}"
         # Separate clients: a long-poll one for export, normal one for everything else.

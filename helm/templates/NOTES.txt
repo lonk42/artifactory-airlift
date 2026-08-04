@@ -26,6 +26,14 @@ namespace (under `artifactory.artifactory`):
           configMap:
             name: {{ .Values.artifactory.caCert.existingConfigMap | quote }}
 {{- end }}
+{{- if .Values.artifactory.tokenFile.existingSecret }}
+        # Bearer token read from disk on every request, so an externally
+        # rotated token is picked up without restarting the pod. Keep this a
+        # directory mount: subPath mounts never receive updates.
+        - name: airlift-token
+          secret:
+            secretName: {{ .Values.artifactory.tokenFile.existingSecret | quote }}
+{{- end }}
       customVolumeMounts: |
         - name: airlift-state
           mountPath: {{ .Values.paths.stateMount }}
@@ -39,6 +47,10 @@ namespace (under `artifactory.artifactory`):
           env:
             - name: AIRLIFT_MODE
               value: {{ .Values.mode | quote }}
+{{- if .Values.artifactory.tokenFile.existingSecret }}
+            - name: AIRLIFT_ARTIFACTORY_TOKEN_FILE
+              value: {{ printf "%s/%s" .Values.artifactory.tokenFile.mountPath .Values.artifactory.tokenFile.key | quote }}
+{{- else }}
             - name: AIRLIFT_ARTIFACTORY_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -54,6 +66,7 @@ namespace (under `artifactory.artifactory`):
                 secretKeyRef:
                   name: {{ include "airlift.secretName" . }}
                   key: password
+{{- end }}
 {{- if .Values.artifactory.caCert.existingConfigMap }}
             - name: AIRLIFT_ARTIFACTORY_CA_CERT
               value: {{ printf "%s/%s" .Values.artifactory.caCert.mountPath .Values.artifactory.caCert.key | quote }}
@@ -70,6 +83,11 @@ namespace (under `artifactory.artifactory`):
 {{- if .Values.artifactory.caCert.existingConfigMap }}
             - name: airlift-ca
               mountPath: {{ .Values.artifactory.caCert.mountPath }}
+              readOnly: true
+{{- end }}
+{{- if .Values.artifactory.tokenFile.existingSecret }}
+            - name: airlift-token
+              mountPath: {{ .Values.artifactory.tokenFile.mountPath }}
               readOnly: true
 {{- end }}
 {{- with .Values.sidecar.securityContext }}
