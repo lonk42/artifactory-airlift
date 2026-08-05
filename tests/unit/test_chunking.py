@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from ._store import fs_store
 from artifactory_airlift import archive, sender
 from artifactory_airlift.config import Settings
 from artifactory_airlift.export_unpacker import ArtifactEntry
@@ -137,8 +138,9 @@ def test_single_chunk_uses_legacy_filename(tmp_path: Path) -> None:
     settings = _settings(tmp_path, max_archive_bytes=0, spool_min_free_bytes=0)
     export = _make_export(tmp_path)
     cycle_id = archive.new_cycle_id()
-    ok = sender._emit_archives(
+    ok, _deferred = sender._emit_archives(
         settings,
+        store=fs_store(settings.filestore_root),
         cycle_id=cycle_id,
         prev_cycle_id=None,
         export_contents=export,
@@ -170,8 +172,9 @@ def test_multi_chunk_emission_layout(tmp_path: Path) -> None:
     export = _make_export(tmp_path)
     cycle_id = archive.new_cycle_id()
     entries = [_entry("r1", f"f{i}", s, 600) for i, s in enumerate(shas)]
-    ok = sender._emit_archives(
+    ok, _deferred = sender._emit_archives(
         settings,
+        store=fs_store(settings.filestore_root),
         cycle_id=cycle_id,
         prev_cycle_id="prev",
         export_contents=export,
@@ -214,8 +217,9 @@ def test_multi_chunk_final_carries_removed(tmp_path: Path) -> None:
     cycle_id = archive.new_cycle_id()
     entries = [_entry("r1", f"f{i}", s, 600) for i, s in enumerate(shas)]
     removed = [_entry("r1", "old.bin", "f" * 40, 7)]
-    ok = sender._emit_archives(
+    ok, _deferred = sender._emit_archives(
         settings,
+        store=fs_store(settings.filestore_root),
         cycle_id=cycle_id,
         prev_cycle_id="prev",
         export_contents=export,
@@ -251,8 +255,9 @@ def test_backpressure_aborts_before_first_chunk(
 
     monkeypatch.setattr(sender.shutil, "disk_usage", lambda _p: _Usage())
 
-    ok = sender._emit_archives(
+    ok, _deferred = sender._emit_archives(
         settings,
+        store=fs_store(settings.filestore_root),
         cycle_id=cycle_id,
         prev_cycle_id=None,
         export_contents=export,
@@ -297,8 +302,9 @@ def test_backpressure_mid_stream_cleans_up_prior_chunks(
 
     monkeypatch.setattr(sender.shutil, "disk_usage", fake_usage)
 
-    ok = sender._emit_archives(
+    ok, _deferred = sender._emit_archives(
         settings,
+        store=fs_store(settings.filestore_root),
         cycle_id=cycle_id,
         prev_cycle_id="prev",
         export_contents=export,

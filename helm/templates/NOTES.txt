@@ -34,6 +34,32 @@ namespace (under `artifactory.artifactory`):
           secret:
             secretName: {{ .Values.artifactory.tokenFile.existingSecret | quote }}
 {{- end }}
+{{- if .Values.binarystore.configFrom.existingSecret }}
+        # binarystore.xml read from a Secret rather than Artifactory's own
+        # on-disk copy, whose credentials Artifactory encrypts in place. Only
+        # the one key is projected: such Secrets often also hold the instance
+        # master and join keys.
+        - name: airlift-binarystore-config
+          secret:
+            secretName: {{ .Values.binarystore.configFrom.existingSecret | quote }}
+            items:
+              - key: {{ .Values.binarystore.configFrom.key | quote }}
+                path: {{ .Values.binarystore.configFrom.key | quote }}
+{{- end }}
+{{- if .Values.binarystore.existingSecret }}
+        # Object-storage credentials, for when binarystore.xml cannot supply
+        # them (Artifactory rewrites them encrypted in its own copy).
+        - name: airlift-binarystore
+          secret:
+            secretName: {{ .Values.binarystore.existingSecret | quote }}
+{{- end }}
+{{- if .Values.binarystore.caCert.existingConfigMap }}
+        # CA bundle for the object-storage endpoint (may differ from the CA
+        # fronting Artifactory itself).
+        - name: airlift-binarystore-ca
+          configMap:
+            name: {{ .Values.binarystore.caCert.existingConfigMap | quote }}
+{{- end }}
       customVolumeMounts: |
         - name: airlift-state
           mountPath: {{ .Values.paths.stateMount }}
@@ -71,6 +97,30 @@ namespace (under `artifactory.artifactory`):
             - name: AIRLIFT_ARTIFACTORY_CA_CERT
               value: {{ printf "%s/%s" .Values.artifactory.caCert.mountPath .Values.artifactory.caCert.key | quote }}
 {{- end }}
+{{- if .Values.binarystore.configFrom.existingSecret }}
+            - name: AIRLIFT_BINARYSTORE_CONFIG
+              value: {{ printf "%s/%s" .Values.binarystore.configFrom.mountPath .Values.binarystore.configFrom.key | quote }}
+{{- end }}
+{{- if .Values.binarystore.existingSecret }}
+            - name: AIRLIFT_BINARYSTORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.binarystore.existingSecret | quote }}
+                  key: accessKey
+                  optional: true
+            - name: AIRLIFT_BINARYSTORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.binarystore.existingSecret | quote }}
+                  key: secretKey
+                  optional: true
+            - name: AIRLIFT_BINARYSTORE_ACCOUNT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.binarystore.existingSecret | quote }}
+                  key: accountKey
+                  optional: true
+{{- end }}
           volumeMounts:
             - name: airlift-state
               mountPath: {{ .Values.paths.stateMount }}
@@ -88,6 +138,21 @@ namespace (under `artifactory.artifactory`):
 {{- if .Values.artifactory.tokenFile.existingSecret }}
             - name: airlift-token
               mountPath: {{ .Values.artifactory.tokenFile.mountPath }}
+              readOnly: true
+{{- end }}
+{{- if .Values.binarystore.configFrom.existingSecret }}
+            - name: airlift-binarystore-config
+              mountPath: {{ .Values.binarystore.configFrom.mountPath }}
+              readOnly: true
+{{- end }}
+{{- if .Values.binarystore.existingSecret }}
+            - name: airlift-binarystore
+              mountPath: {{ .Values.binarystore.mountPath }}
+              readOnly: true
+{{- end }}
+{{- if .Values.binarystore.caCert.existingConfigMap }}
+            - name: airlift-binarystore-ca
+              mountPath: {{ .Values.binarystore.caCert.mountPath }}
               readOnly: true
 {{- end }}
 {{- with .Values.sidecar.securityContext }}

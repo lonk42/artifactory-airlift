@@ -26,7 +26,7 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 by default 
 1. `POST /api/export/system` with `excludeContent=true,includeMetadata=true,createArchive=false`. Artifactory writes the export tree to a path on the state PVC, nested inside a timestamped subdirectory.
 2. Walk the export tree and parse every `*.artifactory-metadata/artifactory-file.xml`, extracting `(repo_key, repo_path, sha1, size)`. Write a sorted JSONL snapshot at `state/snapshots/<cycle_id>.jsonl`.
 3. Two-pointer set-diff against the previous snapshot to compute new `(sha1, repo, path)` triples; when `propagate_deletes` is on (default), also compute removed triples (entries in the previous snapshot that are absent from the current one). Removals are skipped on the first cycle after a clean state, since a missing baseline cannot distinguish "deleted on source" from "never seen".
-4. For each new sha1, locate the raw blob at `<FILESTORE_ROOT>/<sha1[:2]>/<sha1>` (airlift mounts the filestore PVC read-only on the sender side).
+4. For each new sha1, read the raw blob from the binarystore at `<sha1[:2]>/<sha1>`, streaming it straight into the archive. That is a file under `<FILESTORE_ROOT>` for an on-disk filestore (airlift mounts the filestore PVC read-only on the sender side), or an object under the bucket's key prefix for an object-storage backend. A blob that is not there yet is deferred to the next cycle rather than skipped permanently; see "Object-storage binarystores".
 5. Build `<cycle_id>.tar.zst` containing `manifest.json` (with `entries[]` for additions and `removed[]` for deletions), the full `metadata/` subtree from the export, and `blobs/<aa>/<sha1>` entries for each added sha1. Removed entries ship as metadata records only; their blobs are never re-included, because the same sha1 may still be in use elsewhere. The archive is finalised atomically (`.partial` → `os.rename`). When the cycle's cumulative raw blob bytes exceed `max_archive_bytes`, the diff is split into multiple archives named `<cycle_id>-cNNN.tar.zst`; see "Chunked deltas and spool backpressure" below.
 6. Prune `state/snapshots/` under a tiered GFS retention policy (hours/days/months); prune `state/exports/` past the configured history depth.
 
@@ -35,7 +35,7 @@ Tested against Artifactory 7.146.x. The sidecar runs as uid/gid 1030 by default 
 1. List `spool/*.tar.zst` in lexical (and time) order.
 2. Skip any cycle_id already present in `state/processed.jsonl`.
 3. Extract the next archive to `state/import/<cycle_id>/` (must be on the state PVC, not under the artifactory data dir; the import API rejects paths under `/var/opt/jfrog/artifactory/...`).
-4. Stream each blob from `blobs/<aa>/<sha1>` into `<FILESTORE_ROOT>/<aa>/<sha1>.tmp-<pid>`, `fsync`, `rename`, `chown` to `artifactory_uid:artifactory_gid` (skipped when the process lacks permission, e.g. when running under an arbitrary UID), `chmod 0640`. Existing sha1s are skipped (filestore is content-addressed and idempotent).
+4. Write each blob from `blobs/<aa>/<sha1>` into the binarystore. For an on-disk filestore that is a write to `<FILESTORE_ROOT>/<aa>/<sha1>.tmp-<pid>`, `fsync`, `rename`, `chown` to `artifactory_uid:artifactory_gid` (skipped when the process lacks permission, e.g. when running under an arbitrary UID), `chmod 0640`. For object storage it is an upload to the bucket, switching to multipart / staged blocks for large blobs. Existing sha1s are skipped either way (the binarystore is content-addressed and idempotent).
 5. `POST /api/import/repositories?path=<extract_dir>/metadata/repositories&verbose=1`. Artifactory returns 200 even when individual repos fail; the receiver scans the verbose response body for `500 :`, `400 :`, `404 :`, and `Error` lines and records them as per-repo failures.
 6. For each record in the manifest's `removed[]`, issue `DELETE /<repo>/<path>` against the destination. A 404 is treated as success (the artifact is already gone, which is the desired state) but recorded in `delete_failures[]`. Imports run before deletions so a sha1 that both moved away from one path and reappeared at another in the same cycle survives.
 7. Append `{cycle_id, status, blob_count, total_bytes, repos, failures, deleted_count, delete_failures, processed_at}` to `state/processed.jsonl` and move the archive to `spool/.done/`. For chunked cycles, non-final chunks record `status: "blob-staged"` and skip the import and delete steps; the final chunk waits in spool until every earlier chunk for the same `parent_cycle_id` has been recorded, then runs import and deletes against the now-complete blob set.
@@ -59,9 +59,10 @@ Dockerfile                  multi-stage build, runs as uid 1030 (arbitrary-UID s
 ## Prerequisites
 
 - Two JFrog Artifactory instances deployed to Kubernetes. Only the [jfrog/artifactory](https://github.com/jfrog/charts) Helm chart implementation is covered.
-- The Airlift container image is not yet published in a container registry; you will need to build and publish it yourself.
+- The container image is published at `ghcr.io/lonk42/artifactory-airlift` (semver tags plus `latest`), and the Helm chart at `oci://ghcr.io/lonk42/charts/artifactory-airlift`. Both are public, so no registry credential is needed. Building your own is still supported; see below.
 - An admin-scoped access token on each Artifactory (username + password also works as a fallback). See [Authentication](#authentication) below.
 - Every repository that exists on the source must also exist on the destination before the first sync. Repository *definitions* are not propagated by this tool.
+- If either instance stores blobs in object storage rather than on disk, the sidecar needs credentials for that bucket or container. Airlift works out everything else itself; see [Object-storage binarystores](#object-storage-binarystores).
 
 ## Building the airlift sidecar image
 
@@ -276,6 +277,69 @@ includedRepos:
 Watch the sender log for `Allowlist active: syncing only N repo(s): [...]` at
 cycle start to confirm it is in effect.
 
+### Object-storage binarystores
+
+Airlift reads and writes artifact bytes in Artifactory's binarystore directly.
+Three provider families are supported: the default on-disk filestore,
+S3-compatible object storage (Ceph RADOS Gateway, MinIO, AWS S3), and Azure
+Blob Storage. All three key blobs the same way, `<prefix>/<sha1[:2]>/<sha1>`,
+which is what keeps the storage backend a narrow seam.
+
+**The backend is detected, not configured.** At startup each side parses
+Artifactory's own `binarystore.xml` (by default
+`/var/opt/jfrog/artifactory/etc/artifactory/binarystore.xml`, already visible
+because the sidecar mounts the artifactory volume) and works out the bucket or
+container, endpoint, key prefix, and region. Confirm what it picked from the
+first log line:
+
+```
+Binarystore backend: s3 (s3 bucket artifactory-a at http://minio:9000 (prefix 'artifactory/filestore')).
+```
+
+**The two sides are independent.** Each sidecar reads its own instance's
+config, so a sender on Azure Blob feeding a receiver on an S3-compatible store
+needs no special handling.
+
+**Credentials come from the XML when it still has them, otherwise from
+configuration.** Artifactory rewrites `<identity>`, `<credential>` and
+`<accountKey>` encrypted once it takes ownership of the config, as an opaque
+`<keyId>.<algorithm>.<ciphertext>` envelope airlift cannot read. Encrypted
+values are treated as absent, and airlift falls back to
+`binarystore_access_key` / `binarystore_secret_key` (S3) or
+`binarystore_account_key` (Azure), mounted from a Secret via the chart's
+`binarystore.existingSecret`. Explicit configuration always wins when both are
+present.
+
+The tidier option, where your Artifactory chart offers it, is to read
+`binarystore.xml` from the Secret that chart renders rather than from the file
+on Artifactory's own disk. The rendered copy still holds plaintext credentials,
+because Artifactory only encrypts them in its own file once it takes ownership
+on first boot, so one mount supplies the bucket, prefix, endpoint and
+credentials together and no credential needs restating in your values. Set
+`binarystore.configFrom.existingSecret` and the chart wires the mount, the
+`AIRLIFT_BINARYSTORE_CONFIG` env var, and a projection of just the
+`binarystore.xml` key, since such Secrets often also carry the instance master
+and join keys.
+
+**Unsupported chains fail loudly.** Sharded and redundant chains
+(`sharding-cluster`, `double-shards`) and `full-db` providers raise at startup
+naming the provider rather than guessing, because guessing wrong is silent:
+blobs would be written where Artifactory never looks for them. If detection
+misfires, `binarystore_provider` overrides it: `filesystem` forces the on-disk
+path, while `s3` and `azure` assert the detected backend matches.
+
+**Blobs that have not landed yet are retried, not lost.** A chain with an
+`eventual` provider uploads asynchronously, so an artifact can appear in the
+export metadata before its bytes reach the bucket. Those entries are left out
+of the archive manifest and held back from the snapshot that becomes the next
+baseline, so the following cycle re-detects them as added and ships them once
+they are readable. The sender logs `Deferred N entr(ies) ...` when this
+happens; a steady trickle is normal on a busy source, a growing count is not.
+
+Large blobs upload as S3 multipart or Azure staged blocks above
+`binarystore_multipart_threshold`. A single S3 PUT is capped at 5 GiB, so this
+is what allows large artifacts through at all.
+
 | Key (yaml)              | Env                              | Default                                                  | Description                                                                                                                  |
 | ----------------------- | -------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `mode`                  | `AIRLIFT_MODE`                   | `sender`                                                 | Which loop to run: `sender` exports + diffs + spools archives; `receiver` ingests archives + writes blobs + imports repos.   |
@@ -296,7 +360,14 @@ cycle start to confirm it is in effect.
 | `snapshot_retention_hours`  | `AIRLIFT_SNAPSHOT_RETENTION_HOURS`  | `0` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per hour-bucket for the last N hour-buckets (wall clock).        |
 | `snapshot_retention_days`   | `AIRLIFT_SNAPSHOT_RETENTION_DAYS`   | `3` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per day-bucket for the last N day-buckets (UTC).                  |
 | `snapshot_retention_months` | `AIRLIFT_SNAPSHOT_RETENTION_MONTHS` | `0` | Sender-only. GFS tier: keep the newest `state/snapshots/*.jsonl` per calendar-month bucket for the last N months. Real calendar months. |
-| `filestore_root`        | `AIRLIFT_FILESTORE_ROOT`         | `/var/opt/jfrog/artifactory/data/artifactory/filestore`  | Path to Artifactory's binarystore. Sender reads blobs by sha1; receiver writes blobs into `<root>/<sha1[:2]>/<sha1>`.        |
+| `filestore_root`        | `AIRLIFT_FILESTORE_ROOT`         | `/var/opt/jfrog/artifactory/data/artifactory/filestore`  | Path to Artifactory's on-disk binarystore. Sender reads blobs by sha1; receiver writes blobs into `<root>/<sha1[:2]>/<sha1>`. Used only when the binarystore is file-system backed; object-storage backends address the bucket instead. |
+| `binarystore_config`    | `AIRLIFT_BINARYSTORE_CONFIG`     | `/var/opt/jfrog/artifactory/etc/artifactory/binarystore.xml` | Artifactory's binarystore descriptor, parsed at startup to detect which backend holds the blobs. Absent or unparseable falls back to `filestore_root`, which is the pre-object-storage behaviour. See "Object-storage binarystores". |
+| `binarystore_provider`  | `AIRLIFT_BINARYSTORE_PROVIDER`   | `auto`                                                   | Backend override. `auto` trusts `binarystore_config`. `filesystem` forces the on-disk path. `s3` and `azure` assert the detected backend is the expected one and fail at startup otherwise, which is worth setting once the backend is known: guessing wrong fails silently. |
+| `binarystore_access_key`| `AIRLIFT_BINARYSTORE_ACCESS_KEY` | `""`                                                     | Access key for an S3-compatible binarystore. Required when the resolved backend is S3 and `binarystore_config` does not hold plaintext credentials, which is the case for the file on Artifactory's own disk (it encrypts them in place). Takes precedence over the XML when both are present. |
+| `binarystore_secret_key`| `AIRLIFT_BINARYSTORE_SECRET_KEY` | `""`                                                     | Secret key paired with `binarystore_access_key`. Inject via a Secret; the chart mounts it from `binarystore.existingSecret`. |
+| `binarystore_account_key`| `AIRLIFT_BINARYSTORE_ACCOUNT_KEY` | `""`                                                   | Shared key for an Azure Blob binarystore. Required when the resolved backend is Azure. The account name and container come from `binarystore.xml`. |
+| `binarystore_ca_cert`   | `AIRLIFT_BINARYSTORE_CA_CERT`    | `""`                                                     | Path to a PEM CA bundle used to verify the object-storage endpoint's TLS certificate. Separate from `artifactory_ca_cert` because the object store commonly sits behind a different CA. Empty uses the bundled certifi store. |
+| `binarystore_multipart_threshold` | `AIRLIFT_BINARYSTORE_MULTIPART_THRESHOLD` | `256Mi`                        | Blobs at or above this size upload as S3 multipart / Azure staged blocks rather than a single request. Same quantity syntax as `max_archive_bytes`. A single S3 PUT is capped at 5 GiB, so this is what lets large artifacts through. |
 | `artifactory_tmp`       | `AIRLIFT_ARTIFACTORY_TMP`        | `/var/opt/jfrog/artifactory/data/artifactory/tmp`        | Artifactory's tmp dir. Reserved for future use; currently informational.                                                     |
 | `state_dir`             | `AIRLIFT_STATE_DIR`              | `/var/airlift/state`                                     | Durable per-side state (snapshots, cursor, processed ledger, lockfile, extracted import trees). Must be on a PVC.            |
 | `spool_dir`             | `AIRLIFT_SPOOL_DIR`              | `/var/airlift/spool`                                     | Where finalised `*.tar.zst` archives land (sender) and where they're picked up from (receiver). Never NFS; tearing on fsync. |
@@ -358,7 +429,7 @@ kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- rm -f /var
 
 - **Artifactory version**: tested against 7.146.x. The system-export and batch-import API shapes are version-specific; other versions may need tweaks in `artifactory_client.py` and `export_unpacker.py`.
 - **Repository definitions are not synced.** Pre-create all repos on the destination.
-- **Filestore provider**: this tool assumes the default file-system binarystore. Object-store / S3 / multi-tier providers are not yet supported; the path math `<root>/<sha1[:2]>/<sha1>` is hardcoded.
+- **Binarystore providers**: file-system, S3-compatible, and Azure Blob are supported (see "Object-storage binarystores"). Sharded and redundant chains (`sharding-cluster`, `double-shards`) and database-backed providers (`full-db`) are not; airlift refuses to start on those rather than guessing a key layout.
 - **Transport is out of scope.** Moving archives between the two spool PVCs is whatever your air-gap mechanism is.
 - **`/api/import/system` overwrite caveat.** This tool does *not* call `/api/import/system`; it uses `/api/import/repositories`, which is non-destructive for instance config. If you change the receiver to use `/api/import/system` as a fallback, be aware that endpoint overwrites the destination's config (security data, joinKey, masterKey) with the source's.
 

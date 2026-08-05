@@ -112,6 +112,43 @@ class Settings(BaseSettings):
     filestore_root: Path = Path("/var/opt/jfrog/artifactory/data/artifactory/filestore")
     artifactory_tmp: Path = Path("/var/opt/jfrog/artifactory/data/artifactory/tmp")
 
+    # Artifactory's own binarystore descriptor, read to work out which binary
+    # provider backs the filestore (on-disk, S3-compatible, or Azure Blob).
+    # Each side reads its own instance's file, so a sender and receiver backed
+    # by different object stores need no extra configuration. When the file is
+    # absent or unparseable, airlift falls back to filestore_root, which is how
+    # every deployment behaved before object-storage support.
+    binarystore_config: Path = Path(
+        "/var/opt/jfrog/artifactory/etc/artifactory/binarystore.xml"
+    )
+
+    # Override for backend detection. "auto" trusts binarystore.xml.
+    # "filesystem" forces the on-disk path, as an escape hatch when the XML
+    # cannot be parsed. "s3" and "azure" assert that the detected backend is
+    # the expected one and fail loudly otherwise, because guessing wrong fails
+    # silently: blobs would be written where Artifactory never looks for them.
+    binarystore_provider: Literal["auto", "filesystem", "s3", "azure"] = "auto"
+
+    # Object-storage credentials. These cannot be taken from binarystore.xml:
+    # Artifactory rewrites <identity>/<credential>/<accountKey> encrypted, as
+    # an opaque "<keyId>.<algorithm>.<ciphertext>" envelope that needs the
+    # instance master key and an undocumented format to unpick. Supply them
+    # from a Secret instead.
+    binarystore_access_key: str = ""
+    binarystore_secret_key: str = ""
+    binarystore_account_key: str = ""
+
+    # PEM CA bundle for the object-storage endpoint. Deliberately separate
+    # from artifactory_ca_cert: the object store commonly sits behind a
+    # different CA to Artifactory itself. Empty uses the bundled certifi store.
+    binarystore_ca_cert: str = ""
+
+    # Blobs at or above this size upload via S3 multipart / Azure staged
+    # blocks rather than a single request. A single PUT is capped at 5 GiB on
+    # S3, so without this a large artifact simply cannot be stored. Accepts a
+    # k8s-style quantity or a plain integer, like the fields below.
+    binarystore_multipart_threshold: int = Field(default=256 * 1024**2, ge=1)
+
     state_dir: Path = Path("/var/airlift/state")
     spool_dir: Path = Path("/var/airlift/spool")
 
@@ -134,7 +171,12 @@ class Settings(BaseSettings):
     max_archive_bytes: int = Field(default=8 * 1024**3, ge=0)
     spool_min_free_bytes: int = Field(default=2 * 1024**3, ge=0)
 
-    @field_validator("max_archive_bytes", "spool_min_free_bytes", mode="before")
+    @field_validator(
+        "max_archive_bytes",
+        "spool_min_free_bytes",
+        "binarystore_multipart_threshold",
+        mode="before",
+    )
     @classmethod
     def _coerce_byte_size(cls, v):
         return _parse_byte_size(v)

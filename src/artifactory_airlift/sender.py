@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import time
 from collections import Counter
 from pathlib import Path
 
-from . import archive, export_unpacker, log, state
+from . import archive, binarystore, export_unpacker, log, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
@@ -55,12 +57,14 @@ def _loop(
     cursor_path: Path,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
+    store = binarystore.resolve(settings)
     try:
         while True:
             try:
                 _cycle(
                     settings,
                     client=client,
+                    store=store,
                     snapshots_dir=snapshots_dir,
                     exports_dir=exports_dir,
                     cursor_path=cursor_path,
@@ -69,6 +73,7 @@ def _loop(
                 logger.exception("sender.cycle_failed")
             time.sleep(settings.cycle_seconds)
     finally:
+        store.close()
         client.close()
 
 
@@ -76,6 +81,7 @@ def _cycle(
     settings: Settings,
     *,
     client: ArtifactoryClient,
+    store: "binarystore.BlobStore",
     snapshots_dir: Path,
     exports_dir: Path,
     cursor_path: Path,
@@ -222,17 +228,33 @@ def _cycle(
         logger.info("sender.no_changes", cycle_id=cycle_id)
         return
 
-    if not _emit_archives(
+    ok, deferred = _emit_archives(
         settings,
+        store=store,
         cycle_id=cycle_id,
         prev_cycle_id=prev_cycle_id,
         export_contents=export_contents,
         new_entries=new_entries,
         removed_entries=removed_entries,
-    ):
+    )
+    if not ok:
         # Backpressure or other abort. Do not advance the cursor: next
         # cycle re-runs the diff against the same baseline.
         return
+
+    if deferred:
+        # Some blobs were not in the store when we went to read them. Strip
+        # them from the snapshot before it becomes the baseline, so the next
+        # cycle sees them as added again and retries. Without this the cursor
+        # would advance past artifacts whose bytes never shipped and they
+        # would be missed permanently.
+        dropped = _defer_entries(snapshot_path, deferred)
+        logger.warning(
+            "sender.entries_deferred",
+            cycle_id=cycle_id,
+            blob_count=len(deferred),
+            entry_count=dropped,
+        )
 
     _advance_cursor(cursor_path, cycle_id)
     _prune_history(
@@ -289,18 +311,20 @@ def _group_into_chunks(
 def _emit_archives(
     settings: Settings,
     *,
+    store: "binarystore.BlobStore",
     cycle_id: str,
     prev_cycle_id: str | None,
     export_contents: Path,
     new_entries: list,
     removed_entries: list,
-) -> bool:
+) -> tuple[bool, set[str]]:
     """Write all archives for one logical cycle.
 
-    Returns True on success (every chunk written and finalised), False if
-    backpressure aborted the cycle. On failure any partial chunks already
-    landed in spool for this parent are removed so the receiver never sees
-    an incomplete chunk set.
+    Returns (ok, deferred_sha1s). ``ok`` is True when every chunk was written
+    and finalised, False if backpressure aborted the cycle; on failure any
+    partial chunks already landed in spool for this parent are removed so the
+    receiver never sees an incomplete chunk set. ``deferred_sha1s`` are blobs
+    the store could not serve, unioned across chunks.
     """
     # Sort entries deterministically so chunk boundaries are stable across
     # re-runs (matters when the cycle aborts mid-stream and the next loop
@@ -327,6 +351,7 @@ def _emit_archives(
 
     seen_sha1s: set[str] = set()
     written_paths: list[Path] = []
+    deferred: set[str] = set()
     for i, group in enumerate(groups, 1):
         is_final = i == chunk_total
         # Project this chunk's on-disk size from its unseen-sha1 blob bytes
@@ -351,17 +376,17 @@ def _emit_archives(
                 projected_human=log.human_bytes(projected),
             )
             _cleanup_partial_chunks(settings.spool_dir, cycle_id, written_paths)
-            return False
+            return False, deferred
 
         chunk_archive_name, chunk_cycle_id = _chunk_names(cycle_id, i, chunk_total)
-        archive_path = archive.build(
+        archive_path, chunk_deferred = archive.build(
             spool_dir=settings.spool_dir,
             cycle_id=chunk_cycle_id,
             prev_cycle_id=prev_cycle_id,
             source_instance=settings.instance_name,
             export_root=export_contents,
             entries=group,
-            filestore_root=settings.filestore_root,
+            store=store,
             removed=removed_entries if is_final else [],
             archive_name=chunk_archive_name,
             parent_cycle_id=cycle_id,
@@ -370,6 +395,7 @@ def _emit_archives(
             include_metadata=is_final,
             skip_blob_sha1s=seen_sha1s,
         )
+        deferred |= chunk_deferred
         for e in group:
             seen_sha1s.add(e.sha1)
         written_paths.append(archive_path)
@@ -401,7 +427,35 @@ def _emit_archives(
                 repo_count=len(archive_repos),
                 repos=archive_repos,
             )
-    return True
+    return True, deferred
+
+
+def _defer_entries(snapshot_path: Path, deferred_sha1s: set[str]) -> int:
+    """Rewrite a snapshot without the given sha1s. Returns entries removed.
+
+    The snapshot is this cycle's record of what the source holds, and it
+    becomes the baseline the next diff runs against. Dropping an entry here is
+    what makes the next cycle re-detect it as added. Written through a temp
+    file and renamed so a crash mid-rewrite cannot leave a truncated baseline.
+    """
+    if not deferred_sha1s or not snapshot_path.is_file():
+        return 0
+    tmp = snapshot_path.with_suffix(snapshot_path.suffix + f".tmp-{os.getpid()}")
+    removed = 0
+    with open(snapshot_path, encoding="utf-8") as src, open(
+        tmp, "w", encoding="utf-8"
+    ) as dst:
+        for line in src:
+            if not line.strip():
+                continue
+            if json.loads(line)["sha1"] in deferred_sha1s:
+                removed += 1
+                continue
+            dst.write(line)
+        dst.flush()
+        os.fsync(dst.fileno())
+    os.replace(tmp, snapshot_path)
+    return removed
 
 
 def _chunk_names(parent_cycle_id: str, seq: int, total: int) -> tuple[str, str]:

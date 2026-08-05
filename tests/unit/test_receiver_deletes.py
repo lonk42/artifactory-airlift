@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from ._store import fs_store
 from artifactory_airlift import archive, receiver
 from artifactory_airlift.config import Settings
 from artifactory_airlift.export_unpacker import ArtifactEntry
@@ -45,16 +46,17 @@ def _build_archive_with_removals(
     (export_root / "repositories").mkdir(parents=True)
     spool = tmp_path / "spool"
     cycle_id = archive.new_cycle_id()
-    return archive.build(
+    built, _ = archive.build(
         spool_dir=spool,
         cycle_id=cycle_id,
         prev_cycle_id="prev",
         source_instance="art-a",
         export_root=export_root,
         entries=[],
-        filestore_root=tmp_path / "filestore",
+        store=fs_store(tmp_path / "filestore"),
         removed=removed_entries,
     )
+    return built
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -99,6 +101,7 @@ def test_receiver_applies_removals_success(tmp_path: Path) -> None:
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks={},
@@ -129,6 +132,7 @@ def test_receiver_404_logged_not_partial(tmp_path: Path) -> None:
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks={},
@@ -160,6 +164,7 @@ def test_receiver_delete_exception_logged_not_partial(tmp_path: Path) -> None:
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks={},
@@ -187,6 +192,7 @@ def test_receiver_no_removals_field_is_noop(tmp_path: Path) -> None:
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks={},

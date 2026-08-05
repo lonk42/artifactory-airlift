@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 
+from ._store import fs_store
 from artifactory_airlift import archive, receiver
 from artifactory_airlift.config import Settings
 from artifactory_airlift.export_unpacker import ArtifactEntry
@@ -75,20 +76,21 @@ def _build_chunk(
     _make_blob(tmp_path / "fs_src", entry_sha, 11)
     export = _make_export(tmp_path)
     spool = tmp_path / "build_spool"
-    return archive.build(
+    built, _ = archive.build(
         spool_dir=spool,
         cycle_id=f"{parent_cycle_id}-c{chunk_seq:03d}",
         prev_cycle_id="prev",
         source_instance="art-a",
         export_root=export,
         entries=[ArtifactEntry(repo_key="r1", repo_path=f"f{chunk_seq}", sha1=entry_sha, size=11)],
-        filestore_root=tmp_path / "fs_src",
+        store=fs_store(tmp_path / "fs_src"),
         archive_name=f"{parent_cycle_id}-c{chunk_seq:03d}.tar.zst",
         parent_cycle_id=parent_cycle_id,
         chunk_seq=chunk_seq,
         chunk_total=chunk_total,
         include_metadata=include_metadata,
     )
+    return built
 
 
 def _last_processed(processed_path: Path) -> dict:
@@ -115,6 +117,7 @@ def test_blob_only_chunk_skips_import_and_records_staged(tmp_path: Path) -> None
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks=parent_chunks,
@@ -158,6 +161,7 @@ def test_final_chunk_waits_when_earlier_chunks_missing(tmp_path: Path) -> None:
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks=parent_chunks,
@@ -192,6 +196,7 @@ def test_final_chunk_runs_import_once_predecessors_recorded(tmp_path: Path) -> N
     receiver._process_one(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         archive_path=target,
         processed=set(),
         parent_chunks=parent_chunks,

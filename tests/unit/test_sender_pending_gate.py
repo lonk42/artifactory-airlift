@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ._store import fs_store
 from artifactory_airlift import sender
 from artifactory_airlift.config import Settings
 
@@ -58,6 +59,7 @@ def test_cycle_skips_when_pending_archives_remain(tmp_path: Path) -> None:
     sender._cycle(
         settings,
         client=client,
+        store=fs_store(settings.filestore_root),
         snapshots_dir=snaps,
         exports_dir=exports,
         cursor_path=cursor,
@@ -98,6 +100,7 @@ def test_cycle_skip_ignores_partial_files(tmp_path: Path) -> None:
     sender._cycle(
         settings,
         client=_PingFails(),
+        store=fs_store(settings.filestore_root),
         snapshots_dir=snaps,
         exports_dir=exports,
         cursor_path=cursor,

@@ -3,6 +3,8 @@ from pathlib import Path
 from artifactory_airlift import archive
 from artifactory_airlift.export_unpacker import ArtifactEntry
 
+from ._store import fs_store
+
 
 def _make_export(tmp_path: Path, repo: str, artifact: str, sha1: str) -> Path:
     """Build a minimal system-export tree under tmp_path/export."""
@@ -31,14 +33,14 @@ def test_build_and_extract_roundtrip(tmp_path: Path) -> None:
     cycle_id = archive.new_cycle_id()
     entry = ArtifactEntry(repo_key="r1", repo_path="blob.bin", sha1=sha1, size=11)
 
-    archive_path = archive.build(
+    archive_path, deferred = archive.build(
         spool_dir=spool,
         cycle_id=cycle_id,
         prev_cycle_id=None,
         source_instance="art-a",
         export_root=export_root,
         entries=[entry],
-        filestore_root=filestore_root,
+        store=fs_store(filestore_root),
     )
     assert archive_path.is_file()
     assert archive_path.name == f"{cycle_id}.tar.zst"
@@ -74,14 +76,14 @@ def test_build_and_extract_with_removed(tmp_path: Path) -> None:
     gone_sha = "f" * 40
     gone = ArtifactEntry(repo_key="r2", repo_path="old.bin", sha1=gone_sha, size=7)
 
-    archive_path = archive.build(
+    archive_path, deferred = archive.build(
         spool_dir=spool,
         cycle_id=cycle_id,
         prev_cycle_id="prev-xyz",
         source_instance="art-a",
         export_root=export_root,
         entries=[entry],
-        filestore_root=filestore_root,
+        store=fs_store(filestore_root),
         removed=[gone],
     )
 

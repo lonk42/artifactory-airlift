@@ -64,6 +64,70 @@ artifactory:
     key: token                      # key/filename within it
     mountPath: /etc/airlift/token   # where it is mounted in the sidecar
 
+# Binarystore access.
+#
+# Airlift reads and writes artifact bytes in Artifactory's binarystore
+# directly. Which backend that is gets detected from Artifactory's own
+# binarystore.xml on the mounted volume, so an on-disk filestore needs no
+# configuration here at all and the defaults below are a no-op.
+#
+# Each side reads its own instance's config, so the sender and receiver may
+# sit on different backends (for example Azure Blob on one and an
+# S3-compatible store on the other) with no extra wiring.
+#
+# Object-storage backends also need credentials, and there are two ways to
+# supply them. Prefer configFrom below, which reads them from binarystore.xml
+# itself. Otherwise point existingSecret at a Secret holding them, needed when
+# the only binarystore.xml available is Artifactory's own copy, whose
+# credentials it rewrites encrypted on first boot. Expected keys:
+#   accessKey / secretKey   for S3-compatible stores
+#   accountKey              for Azure Blob
+binarystore:
+  # Path to Artifactory's binarystore descriptor inside the pod. Used unless
+  # configFrom below names a Secret to read it from instead.
+  configPath: /var/opt/jfrog/artifactory/etc/artifactory/binarystore.xml
+
+  # Read binarystore.xml from a mounted Secret rather than Artifactory's own
+  # on-disk copy. Prefer this where your Artifactory chart offers it: it
+  # renders a copy of binarystore.xml into a Secret, and that copy still holds
+  # plaintext credentials, because Artifactory only encrypts them in its own
+  # file once it takes ownership on first boot. So this single mount supplies
+  # the bucket, prefix, endpoint AND credentials, and nothing needs restating
+  # under existingSecret below.
+  #
+  # Project only the binarystore.xml key, as the generated snippet does: such
+  # Secrets often also carry the instance master and join keys, which the
+  # sidecar has no reason to see.
+  configFrom:
+    existingSecret: ""                        # Secret holding binarystore.xml
+    key: binarystore.xml                      # key/filename within it
+    mountPath: /etc/airlift/binarystore-config
+
+  # Backend override. "auto" trusts binarystore.xml. "filesystem" forces the
+  # on-disk path if the XML cannot be parsed. "s3"/"azure" assert the detected
+  # backend matches and fail loudly if not, which is worth setting once you
+  # know what the backend should be: guessing wrong fails silently, writing
+  # blobs where Artifactory never looks for them.
+  provider: auto
+
+  # Secret holding the object-storage credentials. The chart references it and
+  # never creates it. Leave empty for a filesystem binarystore.
+  existingSecret: ""
+  mountPath: /etc/airlift/binarystore
+
+  # Trust a private CA for the object-storage endpoint. Deliberately separate
+  # from artifactory.caCert: the object store commonly sits behind a different
+  # CA to Artifactory itself.
+  caCert:
+    existingConfigMap: ""
+    key: ca.crt
+    mountPath: /etc/airlift/binarystore-ca
+
+  # Blobs at or above this size upload as S3 multipart / Azure staged blocks
+  # instead of a single request. A single S3 PUT is capped at 5 GiB, so this
+  # is what lets large artifacts through at all.
+  multipartThreshold: 256Mi
+
 # Cycle behavior.
 cycleSeconds: 300
 historyKeep: 24

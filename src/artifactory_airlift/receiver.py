@@ -5,7 +5,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import archive, filestore, log, state
+from . import archive, binarystore, log, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
@@ -34,30 +34,41 @@ def run(settings: Settings) -> int:
         )
 
     try:
-        filestore.probe(
-            settings.filestore_root,
-            settings.artifactory_uid,
-            settings.artifactory_gid,
-        )
-    except OSError as exc:
+        store = binarystore.resolve(settings)
+    except Exception as exc:
+        # A binarystore we cannot address is fatal: every cycle would write
+        # blobs nowhere useful. Fail at boot rather than each cycle.
+        logger.error("receiver.binarystore_unavailable", error=str(exc))
+        return 2
+
+    try:
+        # Not just OSError any more: an object-storage backend reports an
+        # unreachable endpoint or bad credentials as an HTTP/transport error.
+        store.probe()
+    except Exception as exc:
         logger.error("receiver.filestore_probe_failed", error=str(exc))
+        store.close()
         return 2
 
     try:
         with state.file_lock(lock_path):
             return _loop(
                 settings,
+                store=store,
                 processed_path=processed_path,
                 done_dir=done_dir,
             )
     except RuntimeError as exc:
         logger.error("receiver.lock_held", error=str(exc))
         return 1
+    finally:
+        store.close()
 
 
 def _loop(
     settings: Settings,
     *,
+    store: "binarystore.BlobStore",
     processed_path: Path,
     done_dir: Path,
 ) -> int:
@@ -68,6 +79,7 @@ def _loop(
                 _cycle(
                     settings,
                     client=client,
+                    store=store,
                     processed_path=processed_path,
                     done_dir=done_dir,
                 )
@@ -82,6 +94,7 @@ def _cycle(
     settings: Settings,
     *,
     client: ArtifactoryClient,
+    store: "binarystore.BlobStore",
     processed_path: Path,
     done_dir: Path,
 ) -> None:
@@ -105,6 +118,7 @@ def _cycle(
             _process_one(
                 settings,
                 client=client,
+                store=store,
                 archive_path=archive_path,
                 processed=processed,
                 parent_chunks=parent_chunks,
@@ -119,6 +133,7 @@ def _process_one(
     settings: Settings,
     *,
     client: ArtifactoryClient,
+    store: "binarystore.BlobStore",
     archive_path: Path,
     processed: set[str],
     parent_chunks: dict[str, set[int]],
@@ -208,13 +223,7 @@ def _process_one(
                 if not blob_file.is_file():
                     continue
                 sha1 = blob_file.name
-                created = filestore.write_blob(
-                    blob_file,
-                    settings.filestore_root,
-                    sha1,
-                    uid=settings.artifactory_uid,
-                    gid=settings.artifactory_gid,
-                )
+                created = store.write(blob_file, sha1)
                 if created:
                     written += 1
                 else:
@@ -228,7 +237,7 @@ def _process_one(
     )
 
     # Non-final chunks of a chunked cycle just stage blobs into the
-    # filestore. The "commit" chunk (with chunk_seq == chunk_total) is the
+    # binarystore. The "commit" chunk (with chunk_seq == chunk_total) is the
     # one that carries the metadata tree and runs import_repositories +
     # deletes against the now-complete blob set. Record the staged chunk
     # in processed.jsonl with a distinct status so operators can grep for

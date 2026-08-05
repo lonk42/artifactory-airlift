@@ -17,6 +17,16 @@ data:
     {{- end }}
     filestore_root: {{ .Values.paths.filestoreRoot | quote }}
     artifactory_tmp: {{ .Values.paths.artifactoryTmp | quote }}
+    {{- if .Values.binarystore.configFrom.existingSecret }}
+    binarystore_config: {{ printf "%s/%s" .Values.binarystore.configFrom.mountPath .Values.binarystore.configFrom.key | quote }}
+    {{- else }}
+    binarystore_config: {{ .Values.binarystore.configPath | quote }}
+    {{- end }}
+    binarystore_provider: {{ .Values.binarystore.provider | quote }}
+    binarystore_multipart_threshold: {{ .Values.binarystore.multipartThreshold | quote }}
+    {{- if .Values.binarystore.caCert.existingConfigMap }}
+    binarystore_ca_cert: {{ printf "%s/%s" .Values.binarystore.caCert.mountPath .Values.binarystore.caCert.key | quote }}
+    {{- end }}
     state_dir: {{ .Values.paths.stateMount | quote }}
     spool_dir: {{ .Values.paths.spoolMount | quote }}
     cycle_seconds: {{ .Values.cycleSeconds }}

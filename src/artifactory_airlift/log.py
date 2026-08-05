@@ -86,7 +86,22 @@ _EVENT_TEMPLATES: dict[str, str] = {
 
     # Archive / export internals.
     "archive.built": "Archive built: {blob_count} blob(s), {total_bytes_human} uncompressed, packed to {size_human} ({repo_count} repo(s)) -> {path}",
-    "archive.missing_blob": "Missing blob in filestore: sha1={sha1} repo={repo} path={path}",
+    "archive.missing_blob": "Missing blob in binarystore: sha1={sha1} repo={repo} path={path}",
+    "binarystore.selected": "Binarystore backend: {backend} ({detail}).",
+    "binarystore.credentials_encrypted": (
+        "binarystore.xml holds encrypted credentials; using the configured "
+        "binarystore keys instead."
+    ),
+    "binarystore.multipart_started": (
+        "Multipart upload started: sha1={sha1} size={size} part_bytes={part_bytes}."
+    ),
+    "binarystore.multipart_done": "Multipart upload complete: sha1={sha1} in {parts} part(s).",
+    "binarystore.multipart_abort_failed": "Multipart abort failed: {error}",
+    "receiver.binarystore_unavailable": "Binarystore unavailable: {error}",
+    "sender.entries_deferred": (
+        "Deferred {entry_count} entr(ies) covering {blob_count} blob(s) not yet in "
+        "the binarystore; they will retry next cycle."
+    ),
     "export.no_repositories_dir": "No repositories/ dir in export at {path}.",
 
     # Filestore internals (debug-level).

@@ -9,12 +9,15 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import zstandard as zstd
 
 from . import log
 from .export_unpacker import ArtifactEntry
+
+if TYPE_CHECKING:
+    from .binarystore import BlobStore
 
 logger = log.get("artifactory.archive")
 
@@ -133,7 +136,7 @@ def build(
     source_instance: str,
     export_root: Path,
     entries: Iterable[ArtifactEntry],
-    filestore_root: Path,
+    store: BlobStore,
     removed: Iterable[ArtifactEntry] = (),
     zstd_level: int = 10,
     archive_name: str | None = None,
@@ -142,10 +145,13 @@ def build(
     chunk_total: int = 1,
     include_metadata: bool = True,
     skip_blob_sha1s: Iterable[str] = (),
-) -> Path:
+) -> tuple[Path, set[str]]:
     """Build a per-cycle archive atomically in ``spool_dir``.
 
-    Returns the final archive path. Caller is responsible for ensuring
+    Returns the final archive path and the set of sha1s whose blobs could not
+    be read from ``store``. Those entries are left out of the manifest so it
+    never claims bytes that were not shipped; the sender uses the same set to
+    hold them back from the next baseline. Caller is responsible for ensuring
     ``spool_dir`` exists.
 
     Chunking: when ``chunk_total > 1`` the caller is splitting one logical
@@ -164,9 +170,12 @@ def build(
 
     entries_list = list(entries)
     removed_list = list(removed)
-    repos = sorted({e.repo_key for e in entries_list} | {e.repo_key for e in removed_list})
     total_bytes = 0
     skip_set = set(skip_blob_sha1s)
+    # sha1s the store could not serve. Collected during the blob pass and
+    # excluded from the manifest below.
+    missing: set[str] = set()
+    created_at = int(time.time())
 
     final_name = archive_name or f"{cycle_id}.tar.zst"
     partial_path = spool_dir / f"{final_name}.partial"
@@ -191,39 +200,62 @@ def build(
                 for entry in sorted(export_root.iterdir()):
                     tar.add(entry, arcname=f"{METADATA_PREFIX}/{entry.name}")
 
-            # 2. Raw filestore blobs (dedup by sha1, plus skip any sha1
-            #    already packed by an earlier chunk).
+            # 2. Raw binarystore blobs (dedup by sha1, plus skip any sha1
+            #    already packed by an earlier chunk). Blobs stream out of the
+            #    store straight into the tar, so an object-storage backend
+            #    never stages a copy on the spool volume.
             seen: set[str] = set(skip_set)
             packed: set[str] = set()
             for entry in entries_list:
                 if entry.sha1 in seen:
                     continue
                 seen.add(entry.sha1)
-                packed.add(entry.sha1)
-                blob = filestore_root / entry.sha1[:2] / entry.sha1
-                if not blob.is_file():
+                opened = store.open(entry.sha1)
+                if opened is None:
+                    # The blob is not in the store yet. With an object-storage
+                    # backend this is expected occasionally: a chain with an
+                    # `eventual` provider uploads asynchronously, so a freshly
+                    # deployed artifact can be in the export metadata before
+                    # its bytes have landed. The sender holds the entry back
+                    # from the baseline so the next cycle retries it.
                     logger.warning(
                         "archive.missing_blob",
                         sha1=entry.sha1,
                         repo=entry.repo_key,
                         path=entry.repo_path,
                     )
+                    missing.add(entry.sha1)
                     continue
-                size = blob.stat().st_size
+                reader, size = opened
+                try:
+                    info = tarfile.TarInfo(
+                        name=f"{BLOBS_PREFIX}/{entry.sha1[:2]}/{entry.sha1}"
+                    )
+                    info.size = size
+                    info.mtime = created_at
+                    info.mode = 0o644
+                    tar.addfile(info, reader)
+                finally:
+                    reader.close()
+                packed.add(entry.sha1)
                 total_bytes += size
-                tar.add(
-                    blob,
-                    arcname=f"{BLOBS_PREFIX}/{entry.sha1[:2]}/{entry.sha1}",
-                )
 
             # 3. Manifest last so verifying readers can quickly find it
             #    by scanning a freshly written archive (though we extract
             #    it explicitly by name on the receive side).
+            #
+            #    Entries whose blob the store could not serve are dropped:
+            #    shipping a metadata record with no bytes behind it would ask
+            #    the receiver to import an artifact it cannot materialise.
+            shipped = [e for e in entries_list if e.sha1 not in missing]
+            repos = sorted(
+                {e.repo_key for e in shipped} | {e.repo_key for e in removed_list}
+            )
             manifest = Manifest(
                 schema=SCHEMA_VERSION,
                 cycle_id=cycle_id,
                 prev_cycle_id=prev_cycle_id,
-                created_at=int(time.time()),
+                created_at=created_at,
                 source_instance=source_instance,
                 repos=repos,
                 blob_count=len(packed),
@@ -235,7 +267,7 @@ def build(
                         "path": e.repo_path,
                         "size": e.size,
                     }
-                    for e in entries_list
+                    for e in shipped
                 ],
                 removed=[
                     {
@@ -276,8 +308,9 @@ def build(
         size_human=log.human_bytes(archive_bytes),
         repo_count=len(repos),
         repos=repos,
+        deferred=len(missing),
     )
-    return final_path
+    return final_path, missing
 
 
 def read_manifest(archive_path: Path) -> Manifest:
