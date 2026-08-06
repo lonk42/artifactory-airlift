@@ -109,6 +109,10 @@ class AzureConfig:
     account: str = ""
     prefix: str = _DEFAULT_PREFIX
     account_key: str = ""
+    # True when Artifactory authenticates to the store with the platform's own
+    # instance/managed identity rather than an account key. Airlift signs with
+    # SharedKey, so this only serves a clearer error; see binarystore._build.
+    instance_credentials: bool = False
 
 
 BinarystoreConfig = FilesystemConfig | S3Config | AzureConfig
@@ -155,6 +159,17 @@ def _text(element: ElementTree.Element | None, tag: str, default: str = "") -> s
     if found is None or found.text is None:
         return default
     return found.text.strip()
+
+
+def _first_text(
+    element: ElementTree.Element | None, *tags: str, default: str = ""
+) -> str:
+    """Return the first of several alternative tags that carries a value."""
+    for tag in tags:
+        value = _text(element, tag)
+        if value:
+            return value
+    return default
 
 
 def _flag(element: ElementTree.Element | None, tag: str, default: bool = False) -> bool:
@@ -323,9 +338,13 @@ def parse(path: Path) -> BinarystoreConfig | None:
         )
 
     if provider_type in _AZURE_TYPES:
-        container = _text(settings, "containerName")
+        # The v2 provider names the container <container>; the original names
+        # it <containerName>. Both spellings appear in live configs.
+        container = _first_text(settings, "containerName", "container")
         if not container:
-            raise UnsupportedBinarystore("Azure provider has no <containerName>")
+            raise UnsupportedBinarystore(
+                "Azure provider has no <containerName> or <container>"
+            )
         _note_credentials(settings, "accountKey")
         account = _text(settings, "accountName")
         return AzureConfig(
@@ -334,6 +353,7 @@ def parse(path: Path) -> BinarystoreConfig | None:
             account=account,
             prefix=_text(settings, "path", _DEFAULT_PREFIX).strip("/"),
             account_key=_plaintext(settings, "accountKey"),
+            instance_credentials=_flag(settings, "useInstanceCredentials"),
         )
 
     if provider_type in _FILESYSTEM_TYPES:

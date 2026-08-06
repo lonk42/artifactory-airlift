@@ -50,6 +50,29 @@ LIVE_S3_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 """
 
 
+# From an Azure-backed instance running the v2 provider, which differs from
+# the S3 file above in every structural respect: a template-only chain, the
+# settings block declared under a type the template does not name exactly, and
+# a <container> element in place of <containerName>.
+LIVE_AZURE_V2_XML = """<config version="3">
+    <chain template="azure-blob-storage-v2-direct"/>
+    <provider type="cache-fs" id="cache-fs">
+        <maxCacheSize>123123123</maxCacheSize>
+        <maxFileSizeLimit>123123123</maxFileSizeLimit>
+        <cacheProviderDir>cache</cacheProviderDir>
+    </provider>
+    <provider id="azure-blob-storage-v2" type="azure-blob-storage-v2">
+        <accountName>blah</accountName>
+        <container>artifactory</container>
+        <testConnection>true</testConnection>
+        <maxConnections>123</maxConnections>
+        <enableSignedUrlRedirect>false</enableSignedUrlRedirect>
+        <useInstanceCredentials>true</useInstanceCredentials>
+    </provider>
+</config>
+"""
+
+
 def _write(tmp_path: Path, xml: str) -> Path:
     p = tmp_path / "binarystore.xml"
     p.write_text(xml)
@@ -130,6 +153,25 @@ def test_azure_config(tmp_path: Path) -> None:
     assert cfg.account == "acct"
     # Endpoint is derived from the account when not stated.
     assert cfg.endpoint_url == "https://acct.blob.core.windows.net"
+
+
+def test_live_azure_v2_direct(tmp_path: Path) -> None:
+    """Pinned to a real file from an Azure-backed instance.
+
+    Three details here are not what the docs would lead you to expect: the
+    chain is template-only and names the "-direct" variant while the settings
+    block is declared under the plain type, the container element is
+    <container> rather than <containerName>, and there is no credential at all
+    because Artifactory uses a platform-assigned identity.
+    """
+    cfg = parse(_write(tmp_path, LIVE_AZURE_V2_XML))
+    assert isinstance(cfg, AzureConfig)
+    assert cfg.container == "artifactory"
+    assert cfg.account == "blah"
+    assert cfg.endpoint_url == "https://blah.blob.core.windows.net"
+    assert cfg.prefix == "filestore"
+    assert cfg.account_key == ""
+    assert cfg.instance_credentials is True
 
 
 def test_azure_v2_template_chain(tmp_path: Path) -> None:

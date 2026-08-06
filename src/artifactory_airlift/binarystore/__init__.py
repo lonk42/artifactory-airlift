@@ -140,6 +140,19 @@ def _build(cfg: BinarystoreConfig, settings: "Settings") -> BlobStore:
     if isinstance(cfg, AzureConfig):
         from .azure import AzureBlobStore
 
+        if cfg.instance_credentials and not settings.binarystore_account_key:
+            # Nothing to fall back to: the XML holds no key by design, so the
+            # generic "encrypted or absent" message would send the operator
+            # looking for a credential that was never there.
+            raise UnsupportedBinarystore(
+                "binarystore.xml has <useInstanceCredentials>true</useInstanceCredentials>, "
+                "so Artifactory authenticates to Azure with a platform-assigned "
+                "identity and the file holds no account key. Airlift signs with "
+                "the SharedKey scheme, so set binarystore_account_key "
+                "(AIRLIFT_BINARYSTORE_ACCOUNT_KEY) to a key for storage account "
+                f"{cfg.account or '<accountName>'}."
+            )
+
         return AzureBlobStore(
             cfg,
             account_key=_credential(

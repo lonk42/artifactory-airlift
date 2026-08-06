@@ -13,9 +13,17 @@ import httpx
 import pytest
 from tenacity import wait_none
 
+from artifactory_airlift.binarystore import resolve
 from artifactory_airlift.binarystore.azure import AzureBlobStore
-from artifactory_airlift.binarystore.config import AzureConfig, S3Config
+from artifactory_airlift.binarystore.config import (
+    AzureConfig,
+    S3Config,
+    UnsupportedBinarystore,
+)
 from artifactory_airlift.binarystore.s3 import S3BlobStore
+from artifactory_airlift.config import Settings
+
+from .test_binarystore_config import LIVE_AZURE_V2_XML
 
 S3_CFG = S3Config(
     bucket="artifactory-a",
@@ -210,3 +218,31 @@ def test_azure_staged_blocks_then_commit(tmp_path: Path) -> None:
     assert store.write(src, SHA1) is True
 
     assert [c for _, c in calls] == ["", "block", "block", "block", "blocklist"]
+
+
+def test_instance_credentials_error_names_the_setting(tmp_path: Path) -> None:
+    """An identity-authenticated store fails with an actionable message.
+
+    There is no credential in the XML to fall back to, by design, so the
+    generic "encrypted or absent" wording would send the operator hunting for
+    a key that never existed.
+    """
+    xml = tmp_path / "binarystore.xml"
+    xml.write_text(LIVE_AZURE_V2_XML)
+    settings = Settings(binarystore_config=str(xml))
+
+    with pytest.raises(UnsupportedBinarystore, match="binarystore_account_key"):
+        resolve(settings)
+
+
+def test_configured_account_key_satisfies_instance_credentials(tmp_path: Path) -> None:
+    xml = tmp_path / "binarystore.xml"
+    xml.write_text(LIVE_AZURE_V2_XML)
+    settings = Settings(
+        binarystore_config=str(xml),
+        binarystore_account_key="c2VjcmV0MDAwMDAwMDAwMDAwMDAwMA==",
+    )
+
+    store = resolve(settings)
+    assert store.kind == "azure"
+    store.close()
