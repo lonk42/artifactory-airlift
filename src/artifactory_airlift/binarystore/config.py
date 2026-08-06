@@ -45,6 +45,12 @@ _AZURE_TYPES = frozenset(
         "azure-blob-storage",
         "azure-blob-storage-direct",
         "cluster-azure-blob-storage",
+        # JFrog's newer Azure provider. Same element names and the same
+        # "<path>/<sha1[:2]>/<sha1>" key layout; only Artifactory's own client
+        # implementation differs.
+        "azure-blob-storage-v2",
+        "azure-blob-storage-v2-direct",
+        "cluster-azure-blob-storage-v2",
     }
 )
 _FILESYSTEM_TYPES = frozenset({"file-system", "cache-fs"})
@@ -54,18 +60,12 @@ _FILESYSTEM_TYPES = frozenset({"file-system", "cache-fs"})
 # bytes.
 _PASSTHROUGH_TYPES = frozenset({"cache-fs", "eventual", "retry", "tracking"})
 
-# Chain templates map to the leaf provider they expand to. Artifactory allows
-# either <chain template="s3-storage-v3"/> or an explicit nested <chain>.
-_TEMPLATE_LEAF = {
-    "file-system": "file-system",
-    "cache-fs": "file-system",
-    "s3-storage-v3": "s3-storage-v3",
-    "s3-storage-v3-direct": "s3-storage-v3-direct",
-    "cluster-s3-storage-v3": "cluster-s3-storage-v3",
-    "azure-blob-storage": "azure-blob-storage",
-    "azure-blob-storage-direct": "azure-blob-storage-direct",
-    "cluster-azure-blob-storage": "cluster-azure-blob-storage",
-}
+# Artifactory allows either <chain template="s3-storage-v3"/> or an explicit
+# nested <chain>. A template names the leaf provider it expands to, so any
+# provider type airlift can address is also a template it can accept. Deriving
+# the set from the type sets above keeps the two from drifting apart; templates
+# outside it (sharded, redundant, database-backed) are refused.
+_LEAF_TEMPLATES = _S3_TYPES | _AZURE_TYPES | _FILESYSTEM_TYPES
 
 # Artifactory encrypts secrets in place as "<keyId>.<algorithm>.<ciphertext>",
 # e.g. "a1b2c3.aesgcm256.<ciphertext>". Decrypting needs the instance master
@@ -174,13 +174,12 @@ def _leaf_of_chain(chain: ElementTree.Element) -> tuple[str, ElementTree.Element
     """
     template = chain.get("template", "").strip()
     if template:
-        leaf = _TEMPLATE_LEAF.get(template)
-        if leaf is None:
+        if template not in _LEAF_TEMPLATES:
             raise UnsupportedBinarystore(
                 f"unsupported binarystore chain template: {template!r}. "
                 "Sharded and database-backed chains are not supported."
             )
-        return leaf, None
+        return template, None
 
     current = chain
     element: ElementTree.Element | None = None
@@ -217,18 +216,33 @@ def _resolve_settings(
     puts the settings in sibling top-level <provider> blocks, matched by id or
     type. Some configs inline the settings in the chain instead, so an inline
     element with children wins.
+
+    A template-driven chain names a variant ("...-direct", "cluster-...") whose
+    settings block is sometimes declared under the plain provider type of the
+    same family, so fall back to any provider from that family rather than
+    reporting the settings as missing.
     """
     if inline is not None and len(inline):
         return inline
 
+    # Object-storage families only: a cache-fs block carries a cache directory,
+    # not the filestore, so it must never stand in for a file-system provider.
+    family = next(
+        (f for f in (_S3_TYPES, _AZURE_TYPES) if provider_type in f),
+        frozenset(),
+    )
     wanted_id = inline.get("id", "").strip() if inline is not None else ""
     by_type: ElementTree.Element | None = None
+    by_family: ElementTree.Element | None = None
     for candidate in root.findall("provider"):
+        candidate_type = candidate.get("type", "").strip()
         if wanted_id and candidate.get("id", "").strip() == wanted_id:
             return candidate
-        if by_type is None and candidate.get("type", "").strip() == provider_type:
+        if by_type is None and candidate_type == provider_type:
             by_type = candidate
-    return by_type
+        if by_family is None and candidate_type in family:
+            by_family = candidate
+    return by_type if by_type is not None else by_family
 
 
 def _s3_endpoint(settings: ElementTree.Element | None) -> str:

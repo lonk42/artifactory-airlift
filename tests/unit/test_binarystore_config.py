@@ -132,6 +132,51 @@ def test_azure_config(tmp_path: Path) -> None:
     assert cfg.endpoint_url == "https://acct.blob.core.windows.net"
 
 
+def test_azure_v2_template_chain(tmp_path: Path) -> None:
+    """The v2 provider family is addressed the same way as the original.
+
+    A template-only chain is the common shape here, and this one names the
+    "-direct" variant while the settings block is declared under the plain
+    type, so the settings have to be found by family rather than exact type.
+    """
+    xml = """<config version="2">
+        <chain template="azure-blob-storage-v2-direct"/>
+        <provider type="azure-blob-storage-v2" id="azure-blob-storage-v2">
+            <accountName>acct</accountName>
+            <accountKey>c2VjcmV0</accountKey>
+            <containerName>artifactory</containerName>
+            <endpoint>https://acct.blob.core.windows.net/</endpoint>
+        </provider>
+    </config>"""
+    cfg = parse(_write(tmp_path, xml))
+    assert isinstance(cfg, AzureConfig)
+    assert cfg.container == "artifactory"
+    assert cfg.account == "acct"
+    assert cfg.account_key == "c2VjcmV0"
+    assert cfg.endpoint_url == "https://acct.blob.core.windows.net"
+    # Absent <path> falls back to Artifactory's default prefix.
+    assert cfg.prefix == "filestore"
+
+
+def test_azure_v2_explicit_chain(tmp_path: Path) -> None:
+    xml = """<config version="2">
+        <chain>
+            <provider type="cache-fs" id="cache-fs">
+                <provider type="cluster-azure-blob-storage-v2" id="azure"/>
+            </provider>
+        </chain>
+        <provider type="cluster-azure-blob-storage-v2" id="azure">
+            <accountName>acct</accountName>
+            <containerName>artifactory</containerName>
+            <path>artifactory/filestore</path>
+        </provider>
+    </config>"""
+    cfg = parse(_write(tmp_path, xml))
+    assert isinstance(cfg, AzureConfig)
+    assert cfg.container == "artifactory"
+    assert cfg.prefix == "artifactory/filestore"
+
+
 def test_filesystem_chain(tmp_path: Path) -> None:
     xml = """<config version="2">
         <chain template="file-system"/>
