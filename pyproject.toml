@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "artifactory-airlift"
-version = "0.12.0"
+version = "0.14.0"
 description = "One-way air-gapped sync between two JFrog Artifactory instances"
 requires-python = ">=3.12"
 dependencies = [
