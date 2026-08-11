@@ -70,6 +70,7 @@ namespace (under `artifactory.artifactory`):
       customSidecarContainers: |
         - name: airlift
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: AIRLIFT_MODE
               value: {{ .Values.mode | quote }}

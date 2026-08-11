@@ -35,6 +35,7 @@ __all__ = [
     "BlobStore",
     "FilesystemBlobStore",
     "UnsupportedBinarystore",
+    "acquire",
     "resolve",
 ]
 
@@ -115,6 +116,42 @@ def _credential(configured: str, from_xml: str, setting: str, kind: str) -> str:
     )
 
 
+def _azure_identity(cfg: AzureConfig):
+    """Authenticate as the platform identity when no account key is set.
+
+    This is the same thing Artifactory does when binarystore.xml says
+    <useInstanceCredentials>true</useInstanceCredentials>: no credential is
+    stored anywhere, the platform issues a short-lived token on request. It is
+    also the only route on a storage account with shared-key access disabled,
+    where no account key exists to be configured.
+    """
+    from .azure_identity import IdentityUnavailable, detect
+
+    try:
+        credential = detect()
+    except IdentityUnavailable as exc:
+        hint = (
+            " binarystore.xml says <useInstanceCredentials>true</useInstanceCredentials>, "
+            "so Artifactory holds no account key either; the identity has to reach "
+            "the airlift container too."
+            if cfg.instance_credentials
+            else ""
+        )
+        raise UnsupportedBinarystore(
+            f"no Azure credential for storage account {cfg.account or '<accountName>'}: "
+            f"{exc}. Either set binarystore_account_key "
+            f"(AIRLIFT_BINARYSTORE_ACCOUNT_KEY), or give the container access to a "
+            f"platform identity with the Storage Blob Data Contributor role.{hint}"
+        ) from exc
+
+    logger.info(
+        "binarystore.azure_identity",
+        source=credential.kind,
+        detail=credential.describe(),
+    )
+    return credential
+
+
 def _build(cfg: BinarystoreConfig, settings: "Settings") -> BlobStore:
     if isinstance(cfg, S3Config):
         from .s3 import S3BlobStore
@@ -140,27 +177,12 @@ def _build(cfg: BinarystoreConfig, settings: "Settings") -> BlobStore:
     if isinstance(cfg, AzureConfig):
         from .azure import AzureBlobStore
 
-        if cfg.instance_credentials and not settings.binarystore_account_key:
-            # Nothing to fall back to: the XML holds no key by design, so the
-            # generic "encrypted or absent" message would send the operator
-            # looking for a credential that was never there.
-            raise UnsupportedBinarystore(
-                "binarystore.xml has <useInstanceCredentials>true</useInstanceCredentials>, "
-                "so Artifactory authenticates to Azure with a platform-assigned "
-                "identity and the file holds no account key. Airlift signs with "
-                "the SharedKey scheme, so set binarystore_account_key "
-                "(AIRLIFT_BINARYSTORE_ACCOUNT_KEY) to a key for storage account "
-                f"{cfg.account or '<accountName>'}."
-            )
-
+        account_key = settings.binarystore_account_key or cfg.account_key
+        credential = None if account_key else _azure_identity(cfg)
         return AzureBlobStore(
             cfg,
-            account_key=_credential(
-                settings.binarystore_account_key,
-                cfg.account_key,
-                "binarystore_account_key",
-                "Azure",
-            ),
+            account_key=account_key,
+            credential=credential,
             verify=settings.binarystore_ca_cert or True,
             multipart_threshold=settings.binarystore_multipart_threshold,
         )
@@ -212,6 +234,49 @@ def resolve(settings: "Settings") -> BlobStore:
         detected="auto" if forced == "auto" else "asserted",
         detail=store.describe(),
     )
+    return store
+
+
+def acquire(
+    settings: "Settings", *, component: str, attempt: int = 1, probe: bool = True
+) -> BlobStore | None:
+    """Resolve and probe the blob store, returning None when it is unusable.
+
+    Airlift runs as a sidecar beside Artifactory, so a container that exits
+    takes the whole pod with it: the pod never reports Ready, and a
+    StatefulSet rollout blocks on it. A binarystore airlift cannot address is
+    therefore reported and retried, never fatal. Nothing is lost by waiting,
+    since the sender's cursor only advances on a cycle that completed.
+
+    Retrying also fits how these failures actually resolve themselves: a
+    credential mounted after start, an object store that is briefly
+    unreachable, or a corrected binarystore.xml all become workable without a
+    restart.
+
+    ``probe`` writes a marker to prove the store is writable, so only the
+    receiver asks for it; the sender reads blobs and must stay usable with a
+    read-only credential on the source.
+    """
+    try:
+        store = resolve(settings)
+    except Exception as exc:
+        logger.error(
+            f"{component}.binarystore_unavailable", error=str(exc), attempt=attempt
+        )
+        return None
+
+    try:
+        if probe:
+            store.probe()
+    except Exception as exc:
+        logger.error(
+            f"{component}.filestore_probe_failed", error=str(exc), attempt=attempt
+        )
+        store.close()
+        return None
+
+    if attempt > 1:
+        logger.info(f"{component}.binarystore_recovered", attempts=attempt)
     return store
 
 

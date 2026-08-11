@@ -92,6 +92,28 @@ class SharedKeyAuth(httpx.Auth):
         yield request
 
 
+class BearerAuth(httpx.Auth):
+    """Authenticate as a platform-assigned identity, not with an account key.
+
+    The token is fetched per request from the shared credential, which caches
+    it until close to expiry. Doing the lookup here rather than at
+    construction is what lets a long-running sidecar survive token rotation
+    without a restart, the same reasoning as FileTokenAuth in
+    artifactory_client.
+    """
+
+    def __init__(self, credential) -> None:
+        self._credential = credential
+
+    def auth_flow(self, request: httpx.Request):
+        request.headers["x-ms-date"] = dt.datetime.now(dt.timezone.utc).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        request.headers.setdefault("x-ms-version", _API_VERSION)
+        request.headers["Authorization"] = f"Bearer {self._credential.token()}"
+        yield request
+
+
 def _block_id(number: int) -> str:
     """Base64 block id. Every id for one blob must be the same length."""
     return base64.b64encode(f"{number:08d}".encode()).decode()
@@ -104,20 +126,27 @@ class AzureBlobStore:
         self,
         cfg: AzureConfig,
         *,
-        account_key: str,
+        account_key: str = "",
+        credential=None,
         verify: bool | str = True,
         multipart_threshold: int = 256 * 1024**2,
         part_bytes: int = _BLOCK_BYTES,
         timeout: float = 60.0,
     ) -> None:
+        if not account_key and credential is None:
+            raise ValueError("azure blob store needs an account key or a credential")
         self._cfg = cfg
         self._threshold = multipart_threshold
         self._part_bytes = part_bytes
-        self._http = httpx.Client(
-            auth=SharedKeyAuth(cfg.account, account_key),
-            timeout=timeout,
-            verify=verify,
+        # An account key wins when both are available, so an operator can
+        # always pin behaviour by setting one.
+        self._credential = None if account_key else credential
+        auth = (
+            SharedKeyAuth(cfg.account, account_key)
+            if account_key
+            else BearerAuth(credential)
         )
+        self._http = httpx.Client(auth=auth, timeout=timeout, verify=verify)
 
     # -- addressing ---------------------------------------------------------
 
@@ -130,9 +159,14 @@ class AzureBlobStore:
         return f"{self._cfg.endpoint_url}/{self._cfg.container}/{quote(self._key(sha1))}"
 
     def describe(self) -> str:
+        auth = (
+            f"as {self._credential.describe()}"
+            if self._credential is not None
+            else "with an account key"
+        )
         return (
             f"azure container {self._cfg.container} at {self._cfg.endpoint_url} "
-            f"(prefix {self._cfg.prefix!r})"
+            f"(prefix {self._cfg.prefix!r}) {auth}"
         )
 
     # -- BlobStore ----------------------------------------------------------
@@ -257,3 +291,5 @@ class AzureBlobStore:
 
     def close(self) -> None:
         self._http.close()
+        if self._credential is not None:
+            self._credential.close()

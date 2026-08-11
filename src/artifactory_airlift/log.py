@@ -88,6 +88,10 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "archive.built": "Archive built: {blob_count} blob(s), {total_bytes_human} uncompressed, packed to {size_human} ({repo_count} repo(s)) -> {path}",
     "archive.missing_blob": "Missing blob in binarystore: sha1={sha1} repo={repo} path={path}",
     "binarystore.selected": "Binarystore backend: {backend} ({detail}).",
+    "binarystore.azure_identity": (
+        "Azure: authenticating as a platform identity ({detail}); no account key in use."
+    ),
+    "binarystore.azure_token_acquired": "Azure: access token acquired from {source}.",
     "binarystore.credentials_encrypted": (
         "binarystore.xml holds encrypted credentials; using the configured "
         "binarystore keys instead."
@@ -98,6 +102,14 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "binarystore.multipart_done": "Multipart upload complete: sha1={sha1} in {parts} part(s).",
     "binarystore.multipart_abort_failed": "Multipart abort failed: {error}",
     "receiver.binarystore_unavailable": "Binarystore unavailable: {error}",
+    "sender.binarystore_unavailable": "Binarystore unavailable: {error}",
+    "sender.filestore_probe_failed": "Filestore probe failed: {error}",
+    "receiver.binarystore_recovered": "Binarystore usable again after {attempts} attempt(s).",
+    "sender.binarystore_recovered": "Binarystore usable again after {attempts} attempt(s).",
+    "config_invalid": "Configuration is invalid: {error}. Idling; fix the config and restart.",
+    "unknown_mode": "Unknown mode {mode}. Idling; set mode to sender or receiver.",
+    "parked_after_exit": "Idling after exit code {code} in mode {mode}.",
+    "parked_after_fatal": "Idling after an unhandled error: {error}.",
     "sender.entries_deferred": (
         "Deferred {entry_count} entr(ies) covering {blob_count} blob(s) not yet in "
         "the binarystore; they will retry next cycle."

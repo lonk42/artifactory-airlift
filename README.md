@@ -310,6 +310,24 @@ values are treated as absent, and airlift falls back to
 `binarystore.existingSecret`. Explicit configuration always wins when both are
 present.
 
+**An Azure binarystore needs no credential at all when the platform provides
+an identity.** Where `binarystore.xml` says
+`<useInstanceCredentials>true</useInstanceCredentials>`, Artifactory stores no
+key: it asks the platform who it is and receives a short-lived token. Airlift
+does the same whenever no account key is configured, detecting what the
+platform injected into the container: a projected federated token
+(`AZURE_FEDERATED_TOKEN_FILE` with `AZURE_CLIENT_ID` and `AZURE_TENANT_ID`),
+otherwise the instance metadata endpoint. The token is cached and refreshed
+ahead of expiry, and the assertion file is re-read on every exchange so
+rotation needs no restart. Setting `binarystore_account_key` pins shared-key
+signing instead.
+
+Two things this depends on: the identity must reach the **airlift container**,
+not only Artifactory's (a projected token volume is mounted per container), and
+it needs a role granting data-plane access to blobs, not merely control-plane
+access to the account. This is also the only route on a storage account with
+shared-key access disabled, where no account key exists to configure.
+
 The tidier option, where your Artifactory chart offers it, is to read
 `binarystore.xml` from the Secret that chart renders rather than from the file
 on Artifactory's own disk. The rendered copy still holds plaintext credentials,
@@ -365,7 +383,7 @@ is what allows large artifacts through at all.
 | `binarystore_provider`  | `AIRLIFT_BINARYSTORE_PROVIDER`   | `auto`                                                   | Backend override. `auto` trusts `binarystore_config`. `filesystem` forces the on-disk path. `s3` and `azure` assert the detected backend is the expected one and fail at startup otherwise, which is worth setting once the backend is known: guessing wrong fails silently. |
 | `binarystore_access_key`| `AIRLIFT_BINARYSTORE_ACCESS_KEY` | `""`                                                     | Access key for an S3-compatible binarystore. Required when the resolved backend is S3 and `binarystore_config` does not hold plaintext credentials, which is the case for the file on Artifactory's own disk (it encrypts them in place). Takes precedence over the XML when both are present. |
 | `binarystore_secret_key`| `AIRLIFT_BINARYSTORE_SECRET_KEY` | `""`                                                     | Secret key paired with `binarystore_access_key`. Inject via a Secret; the chart mounts it from `binarystore.existingSecret`. |
-| `binarystore_account_key`| `AIRLIFT_BINARYSTORE_ACCOUNT_KEY` | `""`                                                   | Shared key for an Azure Blob binarystore. Required when the resolved backend is Azure. The account name and container come from `binarystore.xml`. |
+| `binarystore_account_key`| `AIRLIFT_BINARYSTORE_ACCOUNT_KEY` | `""`                                                   | Shared key for an Azure Blob binarystore. Needed only when the container has no platform identity to authenticate with; leave empty to use one. Setting it pins shared-key signing even when an identity is present. The account name and container come from `binarystore.xml`. |
 | `binarystore_ca_cert`   | `AIRLIFT_BINARYSTORE_CA_CERT`    | `""`                                                     | Path to a PEM CA bundle used to verify the object-storage endpoint's TLS certificate. Separate from `artifactory_ca_cert` because the object store commonly sits behind a different CA. Empty uses the bundled certifi store. |
 | `binarystore_multipart_threshold` | `AIRLIFT_BINARYSTORE_MULTIPART_THRESHOLD` | `256Mi`                        | Blobs at or above this size upload as S3 multipart / Azure staged blocks rather than a single request. Same quantity syntax as `max_archive_bytes`. A single S3 PUT is capped at 5 GiB, so this is what lets large artifacts through. |
 | `artifactory_tmp`       | `AIRLIFT_ARTIFACTORY_TMP`        | `/var/opt/jfrog/artifactory/data/artifactory/tmp`        | Artifactory's tmp dir. Reserved for future use; currently informational.                                                     |

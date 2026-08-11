@@ -16,6 +16,12 @@ image:
   #   repository: registry.example.com/artifactory-airlift
   repository: ""
   tag: ""
+  # Stated explicitly rather than left to Kubernetes' default, which depends
+  # on the tag: a "latest" tag implies Always, so a registry that is briefly
+  # unreachable becomes a sidecar that cannot start. A sidecar that cannot
+  # start holds the whole pod out of Ready, which takes Artifactory itself
+  # out of its Service. IfNotPresent reuses the copy already on the node.
+  pullPolicy: IfNotPresent
 
 # Connection to the local Artifactory (talks over loopback as a sidecar).
 # Provide EITHER a bearer access token (recommended), OR a username+password
@@ -82,6 +88,12 @@ artifactory:
 # credentials it rewrites encrypted on first boot. Expected keys:
 #   accessKey / secretKey   for S3-compatible stores
 #   accountKey              for Azure Blob
+#
+# An Azure binarystore needs no credential here at all when the platform gives
+# the container an identity, which is what Artifactory itself uses where
+# binarystore.xml says <useInstanceCredentials>true</useInstanceCredentials>.
+# Leave accountKey unset and airlift authenticates the same way. The identity
+# has to reach the airlift container, not only Artifactory's.
 binarystore:
   # Path to Artifactory's binarystore descriptor inside the pod. Used unless
   # configFrom below names a Secret to read it from instead.

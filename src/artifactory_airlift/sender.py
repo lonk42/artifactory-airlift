@@ -57,9 +57,23 @@ def _loop(
     cursor_path: Path,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
-    store = binarystore.resolve(settings)
+    store: binarystore.BlobStore | None = None
+    attempt = 0
     try:
         while True:
+            # Resolved in the loop rather than before it: an unusable
+            # binarystore leaves this cycle idle instead of ending the
+            # process, which would take Artifactory's pod down with it.
+            if store is None:
+                attempt += 1
+                store = binarystore.acquire(
+                    settings, component="sender", attempt=attempt, probe=False
+                )
+                if store is None:
+                    time.sleep(settings.cycle_seconds)
+                    continue
+                attempt = 0
+
             try:
                 _cycle(
                     settings,
@@ -73,7 +87,8 @@ def _loop(
                 logger.exception("sender.cycle_failed")
             time.sleep(settings.cycle_seconds)
     finally:
-        store.close()
+        if store is not None:
+            store.close()
         client.close()
 
 

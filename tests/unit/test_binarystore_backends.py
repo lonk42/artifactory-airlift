@@ -220,19 +220,50 @@ def test_azure_staged_blocks_then_commit(tmp_path: Path) -> None:
     assert [c for _, c in calls] == ["", "block", "block", "block", "blocklist"]
 
 
-def test_instance_credentials_error_names_the_setting(tmp_path: Path) -> None:
-    """An identity-authenticated store fails with an actionable message.
+def test_no_key_and_no_identity_names_both_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With neither a key nor an identity, say what would fix it.
 
     There is no credential in the XML to fall back to, by design, so the
     generic "encrypted or absent" wording would send the operator hunting for
     a key that never existed.
     """
+    for name in (
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "AZURE_USE_INSTANCE_METADATA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     xml = tmp_path / "binarystore.xml"
     xml.write_text(LIVE_AZURE_V2_XML)
     settings = Settings(binarystore_config=str(xml))
 
-    with pytest.raises(UnsupportedBinarystore, match="binarystore_account_key"):
+    with pytest.raises(UnsupportedBinarystore) as caught:
         resolve(settings)
+    assert "binarystore_account_key" in str(caught.value)
+    assert "Storage Blob Data Contributor" in str(caught.value)
+
+
+def test_identity_is_used_when_no_key_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: Artifactory holds no key, so airlift needs none either."""
+    token_file = tmp_path / "token"
+    token_file.write_text("assertion")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "client-1")
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-1")
+    monkeypatch.setenv("AZURE_FEDERATED_TOKEN_FILE", str(token_file))
+
+    xml = tmp_path / "binarystore.xml"
+    xml.write_text(LIVE_AZURE_V2_XML)
+
+    store = resolve(Settings(binarystore_config=str(xml)))
+    assert store.kind == "azure"
+    assert "federated identity client-1" in store.describe()
+    store.close()
 
 
 def test_configured_account_key_satisfies_instance_credentials(tmp_path: Path) -> None:

@@ -34,47 +34,42 @@ def run(settings: Settings) -> int:
         )
 
     try:
-        store = binarystore.resolve(settings)
-    except Exception as exc:
-        # A binarystore we cannot address is fatal: every cycle would write
-        # blobs nowhere useful. Fail at boot rather than each cycle.
-        logger.error("receiver.binarystore_unavailable", error=str(exc))
-        return 2
-
-    try:
-        # Not just OSError any more: an object-storage backend reports an
-        # unreachable endpoint or bad credentials as an HTTP/transport error.
-        store.probe()
-    except Exception as exc:
-        logger.error("receiver.filestore_probe_failed", error=str(exc))
-        store.close()
-        return 2
-
-    try:
         with state.file_lock(lock_path):
             return _loop(
                 settings,
-                store=store,
                 processed_path=processed_path,
                 done_dir=done_dir,
             )
     except RuntimeError as exc:
         logger.error("receiver.lock_held", error=str(exc))
         return 1
-    finally:
-        store.close()
 
 
 def _loop(
     settings: Settings,
     *,
-    store: "binarystore.BlobStore",
     processed_path: Path,
     done_dir: Path,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
+    store: "binarystore.BlobStore | None" = None
+    attempt = 0
     try:
         while True:
+            # Resolved and probed in the loop rather than before it: an
+            # unusable binarystore used to exit the process, which crashloops
+            # the container and so keeps Artifactory's own pod from ever
+            # reporting Ready. Archives stay in spool until it is workable.
+            if store is None:
+                attempt += 1
+                store = binarystore.acquire(
+                    settings, component="receiver", attempt=attempt
+                )
+                if store is None:
+                    time.sleep(settings.cycle_seconds)
+                    continue
+                attempt = 0
+
             try:
                 _cycle(
                     settings,
@@ -87,6 +82,8 @@ def _loop(
                 logger.exception("receiver.cycle_failed")
             time.sleep(settings.cycle_seconds)
     finally:
+        if store is not None:
+            store.close()
         client.close()
 
 
