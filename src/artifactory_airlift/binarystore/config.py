@@ -27,6 +27,14 @@ logger = log.get("binarystore.config")
 
 # Default key prefix used by the object-storage providers when <path> is
 # omitted. Artifactory writes blobs to "<path>/<sha1[:2]>/<sha1>".
+#
+# This default is not universal: JFrog documents "filestore" for s3-storage-v3
+# but "data" for azure-blob-storage-v2, and the v1 Azure provider has no <path>
+# parameter at all. Getting it wrong fails silently, since a blob that is not
+# where we looked is indistinguishable from one Artifactory has not written
+# yet, so every read 404s and the entries are deferred forever. Rather than
+# encode a guess per provider family, settings.binarystore_prefix overrides
+# this outright; see binarystore.resolve.
 _DEFAULT_PREFIX = "filestore"
 
 # Provider types we can address directly, grouped by the backend that serves

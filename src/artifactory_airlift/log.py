@@ -88,6 +88,10 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "archive.built": "Archive built: {blob_count} blob(s), {total_bytes_human} uncompressed, packed to {size_human} ({repo_count} repo(s)) -> {path}",
     "archive.missing_blob": "Missing blob in binarystore: sha1={sha1} repo={repo} path={path}",
     "binarystore.selected": "Binarystore backend: {backend} ({detail}).",
+    "binarystore.prefix_override": (
+        "Binarystore key prefix overridden to {configured!r} "
+        "(binarystore.xml said {from_xml!r})."
+    ),
     "binarystore.azure_identity": (
         "Azure: authenticating as a platform identity ({detail}); no account key in use."
     ),

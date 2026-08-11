@@ -354,6 +354,26 @@ baseline, so the following cycle re-detects them as added and ships them once
 they are readable. The sender logs `Deferred N entr(ies) ...` when this
 happens; a steady trickle is normal on a busy source, a growing count is not.
 
+**When the key prefix is not in the XML.** Blobs are keyed
+`<path>/<sha1[:2]>/<sha1>`, where `<path>` comes from the provider block in
+`binarystore.xml`. When that element is omitted the provider falls back to its
+own default, and those defaults differ: the S3 provider uses `filestore`, the
+Azure Blob v2 provider uses `data`, and the original Azure provider has no
+`<path>` parameter at all. Airlift assumes `filestore`, so an Azure Blob v2
+store whose XML omits `<path>` is addressed at the wrong keys.
+
+Set `binarystore_prefix` to correct it (`data` for that case, or `/` for the
+bucket/container root). Do not add `<path>` to `binarystore.xml` instead:
+Artifactory reads the same file, so stating a prefix it was not already using
+relocates its own filestore and it stops finding every blob it has written.
+
+This one is worth checking rather than assuming, because it fails quietly. A
+blob that is not where airlift looked returns 404, which is indistinguishable
+from one that has not been uploaded yet, so entries are deferred (see below)
+instead of raising. The signature is every read 404ing and a deferral count
+that only grows. Confirm against the store itself by finding a known
+artifact's sha1 in a listing of the bucket or container.
+
 Large blobs upload as S3 multipart or Azure staged blocks above
 `binarystore_multipart_threshold`. A single S3 PUT is capped at 5 GiB, so this
 is what allows large artifacts through at all.
@@ -381,6 +401,7 @@ is what allows large artifacts through at all.
 | `filestore_root`        | `AIRLIFT_FILESTORE_ROOT`         | `/var/opt/jfrog/artifactory/data/artifactory/filestore`  | Path to Artifactory's on-disk binarystore. Sender reads blobs by sha1; receiver writes blobs into `<root>/<sha1[:2]>/<sha1>`. Used only when the binarystore is file-system backed; object-storage backends address the bucket instead. |
 | `binarystore_config`    | `AIRLIFT_BINARYSTORE_CONFIG`     | `/var/opt/jfrog/artifactory/etc/artifactory/binarystore.xml` | Artifactory's binarystore descriptor, parsed at startup to detect which backend holds the blobs. Absent or unparseable falls back to `filestore_root`, which is the pre-object-storage behaviour. See "Object-storage binarystores". |
 | `binarystore_provider`  | `AIRLIFT_BINARYSTORE_PROVIDER`   | `auto`                                                   | Backend override. `auto` trusts `binarystore_config`. `filesystem` forces the on-disk path. `s3` and `azure` assert the detected backend is the expected one and fail at startup otherwise, which is worth setting once the backend is known: guessing wrong fails silently. |
+| `binarystore_prefix`    | `AIRLIFT_BINARYSTORE_PREFIX`     | `""` (from the XML)                                      | Key prefix override, i.e. the `<path>` part of `<path>/<sha1[:2]>/<sha1>`. Empty takes it from `binarystore_config`, which is correct whenever `<path>` is stated there. Set it when `<path>` is omitted and the provider's own default differs from airlift's `filestore`; the Azure Blob v2 provider defaults to `data`. Use `/` for the bucket/container root. See "When the key prefix is not in the XML". |
 | `binarystore_access_key`| `AIRLIFT_BINARYSTORE_ACCESS_KEY` | `""`                                                     | Access key for an S3-compatible binarystore. Required when the resolved backend is S3 and `binarystore_config` does not hold plaintext credentials, which is the case for the file on Artifactory's own disk (it encrypts them in place). Takes precedence over the XML when both are present. |
 | `binarystore_secret_key`| `AIRLIFT_BINARYSTORE_SECRET_KEY` | `""`                                                     | Secret key paired with `binarystore_access_key`. Inject via a Secret; the chart mounts it from `binarystore.existingSecret`. |
 | `binarystore_account_key`| `AIRLIFT_BINARYSTORE_ACCOUNT_KEY` | `""`                                                   | Shared key for an Azure Blob binarystore. Needed only when the container has no platform identity to authenticate with; leave empty to use one. Setting it pins shared-key signing even when an identity is present. The account name and container come from `binarystore.xml`. |

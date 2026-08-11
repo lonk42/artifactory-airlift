@@ -129,6 +129,24 @@ class Settings(BaseSettings):
     # silently: blobs would be written where Artifactory never looks for them.
     binarystore_provider: Literal["auto", "filesystem", "s3", "azure"] = "auto"
 
+    # Override for the object-storage key prefix, i.e. the "<path>" part of
+    # "<path>/<sha1[:2]>/<sha1>". Empty (default) takes it from binarystore.xml,
+    # which is right whenever <path> is stated explicitly.
+    #
+    # It is needed because the *default* when <path> is omitted is not universal:
+    # JFrog documents "filestore" for s3-storage-v3 but "data" for
+    # azure-blob-storage-v2, and the v1 Azure provider has no <path> parameter at
+    # all. Editing binarystore.xml to state it is not a safe workaround, since
+    # Artifactory reads the same file and would relocate its own filestore.
+    #
+    # A wrong prefix fails silently rather than loudly: a blob that is not where
+    # airlift looked is indistinguishable from one Artifactory has not written
+    # yet, so reads 404 and the entries defer forever instead of erroring.
+    #
+    # Set to "/" to address the container/bucket root (an empty prefix); the
+    # empty string means "unset", so it cannot express that on its own.
+    binarystore_prefix: str = ""
+
     # Object-storage credentials. These cannot be taken from binarystore.xml:
     # Artifactory rewrites <identity>/<credential>/<accountKey> encrypted, as
     # an opaque "<keyId>.<algorithm>.<ciphertext>" envelope that needs the

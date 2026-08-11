@@ -13,6 +13,7 @@ store and a receiver on another need no special handling.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -193,6 +194,32 @@ def _build(cfg: BinarystoreConfig, settings: "Settings") -> BlobStore:
     )
 
 
+def _apply_prefix_override(
+    cfg: BinarystoreConfig, override: str
+) -> BinarystoreConfig:
+    """Replace the key prefix taken from the XML with a configured one.
+
+    Only object-storage configs carry a prefix; a filesystem config is returned
+    untouched so setting the override alongside an on-disk filestore is a no-op
+    rather than an error.
+
+    ``"/"`` means the bucket/container root. The empty string already means
+    "unset", so it cannot also mean "no prefix", and ``strip("/")`` turns "/"
+    into "" which is exactly what ``sha1_key`` treats as a bare
+    ``<sha1[:2]>/<sha1>`` key.
+    """
+    override = override.strip()
+    if not override or isinstance(cfg, FilesystemConfig):
+        return cfg
+    prefix = override.strip("/")
+    if prefix == cfg.prefix:
+        return cfg
+    logger.info(
+        "binarystore.prefix_override", configured=prefix, from_xml=cfg.prefix
+    )
+    return replace(cfg, prefix=prefix)
+
+
 def resolve(settings: "Settings") -> BlobStore:
     """Build the blob store for this side, detecting the backend from the XML.
 
@@ -202,6 +229,10 @@ def resolve(settings: "Settings") -> BlobStore:
     and fail loudly otherwise. That assertion matters because the failure mode
     of guessing wrong is silent: blobs would be written where Artifactory never
     looks for them.
+
+    ``binarystore_prefix`` overrides the key prefix the XML implies, for the
+    case where <path> is omitted and airlift's default does not match the one
+    the provider actually uses.
     """
     forced = settings.binarystore_provider.strip().lower()
 
@@ -226,6 +257,8 @@ def resolve(settings: "Settings") -> BlobStore:
             f"binarystore_provider is {forced!r} but binarystore.xml describes a "
             f"{cfg.kind!r} backend"
         )
+
+    cfg = _apply_prefix_override(cfg, settings.binarystore_prefix)
 
     store = _build(cfg, settings)
     logger.info(

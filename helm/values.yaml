@@ -122,6 +122,16 @@ binarystore:
   # blobs where Artifactory never looks for them.
   provider: auto
 
+  # Key prefix override, i.e. the "<path>" part of "<path>/<sha1[:2]>/<sha1>".
+  # Empty takes it from binarystore.xml, which is correct whenever <path> is
+  # stated there explicitly. Set it when <path> is omitted and the provider's
+  # own default differs from airlift's ("filestore"): notably the Azure Blob v2
+  # provider defaults to "data". Editing binarystore.xml instead is not safe,
+  # because Artifactory reads the same file and would relocate its filestore.
+  # Use "/" for the bucket/container root. Symptom of getting this wrong is
+  # every blob read returning 404 and entries deferring forever.
+  prefix: ""
+
   # Secret holding the object-storage credentials. The chart references it and
   # never creates it. Leave empty for a filesystem binarystore.
   existingSecret: ""
