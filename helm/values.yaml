@@ -27,7 +27,7 @@ image:
 # Provide EITHER a bearer access token (recommended), OR a username+password
 # pair for basic auth. An admin-scoped access token (applied-permissions/admin,
 # or any token whose subject is an admin user) authorises every endpoint
-# airlift calls, including /api/export/system and /api/import/repositories.
+# airlift calls, including /api/search/aql and /api/import/repositories.
 # Mint it once via the Artifactory UI (Administration > User Management >
 # Access Tokens); it cannot be bootstrapped from username+password. Basic auth
 # takes precedence when both username and password are set, so to use the
@@ -134,8 +134,13 @@ binarystore:
 
   # Secret holding the object-storage credentials. The chart references it and
   # never creates it. Leave empty for a filesystem binarystore.
+  #
+  # Setting this adds the AIRLIFT_BINARYSTORE_* env vars to the generated
+  # sidecar snippet; the credentials travel as env vars, so no volume is
+  # involved. The refs are optional, so a key name that does not match the
+  # Secret resolves to empty rather than failing, and airlift then reports the
+  # credential as unset. Edit the key names in the snippet to suit the Secret.
   existingSecret: ""
-  mountPath: /etc/airlift/binarystore
 
   # Trust a private CA for the object-storage endpoint. Deliberately separate
   # from artifactory.caCert: the object store commonly sits behind a different
@@ -185,6 +190,10 @@ spoolMinFreeBytes: 2Gi
 # all three tiers; a single snapshot can satisfy more than one tier.
 # Months are real calendar months (not 30-day windows). At least one
 # tier must be > 0.
+# Refuse any cycle that would delete more than this fraction of the mirror.
+# A short enumeration and a genuine mass deletion look identical, so the
+# sender stops rather than guessing. 1.0 disables it; 0 refuses any deletion.
+maxDeleteFraction: 0.05
 snapshotRetentionHours: 0
 snapshotRetentionDays: 3
 snapshotRetentionMonths: 0

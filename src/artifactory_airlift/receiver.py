@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from collections import Counter
@@ -309,13 +310,31 @@ def _process_one(
             # The endpoint returns 200 even when individual repos fail.
             # Per-repo failures show up as lines like:
             #   "500 : No directory for repository <repo> found at <path>"
-            # System repos that have no exported content (e.g.
-            # artifactory-build-info, jfrog-usage-logs) commonly hit
-            # this; they're benign for our use case but worth recording.
+            # Artifactory walks every repository it holds, so a repository
+            # this cycle did not touch always reports that line. See
+            # _is_absent_repo_notice for why those are dropped rather than
+            # recorded.
+            # Derived from the tree rather than from manifest.repos, which
+            # also names repositories that only appear in removed[]: those
+            # correctly have no directory, since a deletion ships no
+            # metadata. The question here is only ever "did this archive
+            # carry a directory for that repository?".
+            shipped = {p.name for p in metadata_root.iterdir() if p.is_dir()}
+            skipped_absent = 0
             for line in response_text.splitlines():
                 stripped = line.strip()
-                if stripped.startswith(("500 :", "400 :", "404 :", "Error")):
-                    failures.append(stripped)
+                if not stripped.startswith(("500 :", "400 :", "404 :", "Error")):
+                    continue
+                if _is_absent_repo_notice(stripped, shipped):
+                    skipped_absent += 1
+                    continue
+                failures.append(stripped)
+            if skipped_absent:
+                logger.debug(
+                    "receiver.import_absent_repos",
+                    cycle_id=cycle_id,
+                    count=skipped_absent,
+                )
             if failures:
                 logger.warning(
                     "receiver.import_partial",
@@ -401,6 +420,39 @@ def _process_one(
         status=status,
         moved_to=str(done_target),
     )
+
+
+# "500 : No directory for repository <key> found at <path>" and
+# "500 : The directory <key> does not match any repository key."
+_ABSENT_REPO_RE = re.compile(
+    r"No directory for repository (?P<key>\S+) found at|"
+    r"The directory (?P<key2>\S+) does not match any repository key"
+)
+
+
+def _is_absent_repo_notice(line: str, shipped: set[str]) -> bool:
+    """True when a per-repo failure just means "this cycle did not ship it".
+
+    ``/api/import/repositories`` walks every repository the destination
+    holds and reports one of these lines for each one with no directory in
+    the tree. That used to be rare, because the tree was a full system
+    export and so contained every repository. The tree is now synthesised
+    for the changed artifacts only, so every untouched repository produces
+    one of these lines on every cycle: dozens of WARNs and a permanent
+    ``status=partial`` that would say nothing.
+
+    ``shipped`` is the set of repository directories actually present in the
+    extracted tree. A repository absent from it is one airlift chose not to
+    ship (or one that changed only by deletion, which carries no metadata),
+    so the notice describes the design rather than a failure. A repository
+    that *is* in the tree still counts, because a missing directory for one
+    of those means the archive or the extraction is wrong.
+    """
+    m = _ABSENT_REPO_RE.search(line)
+    if m is None:
+        return False
+    key = m.group("key") or m.group("key2") or ""
+    return key not in shipped
 
 
 def _load_processed(path: Path) -> tuple[set[str], dict[str, set[int]]]:

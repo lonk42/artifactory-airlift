@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import archive, binarystore, export_unpacker, log, state
+from . import aql, archive, binarystore, log, metadata_synth, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
@@ -124,17 +124,9 @@ def _cycle(
         return
 
     cycle_id = archive.new_cycle_id()
-    export_root = exports_dir / cycle_id
-    export_root.mkdir(parents=True, exist_ok=True)
 
     logger.info("sender.cycle_start", cycle_id=cycle_id)
-    client.export_system(export_root)
 
-    # Artifactory writes the export into a single timestamped subdirectory
-    # under our exportPath (e.g. `20260511.024656/`), with `repositories/`
-    # and friends inside it. Find that one subdir and treat it as the
-    # actual export root.
-    export_contents = _locate_export_contents(export_root)
     excluded = _resolve_excluded_repos(client, settings)
     if excluded:
         logger.info(
@@ -152,8 +144,8 @@ def _cycle(
             count=len(included),
         )
     snapshot_path = snapshots_dir / f"{cycle_id}.jsonl"
-    count = export_unpacker.write_snapshot(
-        export_contents,
+    count = aql.write_snapshot(
+        client,
         snapshot_path,
         excluded_repos=excluded,
         included_repos=included,
@@ -207,6 +199,31 @@ def _cycle(
         removed=len(removed_entries),
     )
 
+    # Deletion brake. Enumeration is now a database query, which can come
+    # back short while still looking healthy; a filesystem walk failed
+    # loudly. A short enumeration is indistinguishable from mass deletion,
+    # so cap how much of the mirror one cycle may remove and refuse rather
+    # than guess. Cause-agnostic on purpose: it catches a collapsed
+    # projection, a partial result, a hidden repo, or a genuinely
+    # catastrophic delete on the source, all the same way.
+    if removed_entries and prev_snapshot is not None:
+        baseline = _count_snapshot_entries(prev_snapshot)
+        fraction = len(removed_entries) / baseline if baseline else 1.0
+        if fraction > settings.max_delete_fraction:
+            logger.error(
+                "sender.delete_brake_tripped",
+                cycle_id=cycle_id,
+                removed=len(removed_entries),
+                baseline=baseline,
+                fraction=round(fraction, 4),
+                limit=settings.max_delete_fraction,
+            )
+            # No archive, no cursor advance. The next cycle re-runs the diff
+            # against the same baseline, so a transient short read recovers
+            # by itself and a real mass deletion keeps tripping until an
+            # operator raises the limit deliberately.
+            return
+
     if new_entries or removed_entries:
         added_per_repo = Counter(e.repo_key for e in new_entries)
         removed_per_repo = Counter(e.repo_key for e in removed_entries)
@@ -243,12 +260,40 @@ def _cycle(
         logger.info("sender.no_changes", cycle_id=cycle_id)
         return
 
+    # Synthesise the metadata tree the receiver's import needs, covering only
+    # the artifacts this cycle ships. This is what used to arrive as a full
+    # system export of the whole instance.
+    synth_root = exports_dir / cycle_id
+    if synth_root.exists():
+        shutil.rmtree(synth_root)
+    synth_root.mkdir(parents=True, exist_ok=True)
+    meta_rows = aql.fetch_metadata(client, new_entries)
+    written, unresolved = metadata_synth.build_tree(
+        synth_root, new_entries, meta_rows
+    )
+    if unresolved:
+        # The artifact was in the enumeration but its metadata query returned
+        # nothing, so it was almost certainly deleted between the two calls.
+        # Drop it from this cycle; the next enumeration will not list it.
+        gone = {(e.repo_key, e.repo_path) for e in unresolved}
+        new_entries = [e for e in new_entries if (e.repo_key, e.repo_path) not in gone]
+        logger.warning(
+            "sender.metadata_unresolved",
+            cycle_id=cycle_id,
+            count=len(unresolved),
+        )
+    logger.info(
+        "sender.metadata_synthesised",
+        cycle_id=cycle_id,
+        entries=written,
+    )
+
     ok, deferred = _emit_archives(
         settings,
         store=store,
         cycle_id=cycle_id,
         prev_cycle_id=prev_cycle_id,
-        export_contents=export_contents,
+        export_contents=synth_root,
         new_entries=new_entries,
         removed_entries=removed_entries,
     )
@@ -595,6 +640,20 @@ def _resolve_excluded_repos(
             if key:
                 excluded.add(key)
     return excluded
+
+
+def _count_snapshot_entries(snapshot_path: Path) -> int:
+    """Count entries in a JSONL snapshot. Returns 0 when unreadable.
+
+    Used as the denominator for the deletion brake, so it counts lines
+    rather than parsing: a malformed line would still represent an entry
+    that existed in the baseline.
+    """
+    try:
+        with snapshot_path.open() as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
 
 
 def _count_snapshot_repos(snapshot_path: Path) -> Counter:

@@ -139,6 +139,42 @@ class ArtifactoryClient:
         r.raise_for_status()
         return r.json()
 
+    @retry(**_RETRY)
+    def aql(self, query: str) -> list[dict[str, Any]]:
+        """Run an AQL query and return its ``results`` list.
+
+        Uses the long-timeout client: a whole-instance enumeration on a
+        populated source is a single request that can run for seconds and
+        return tens of megabytes.
+
+        The response also carries a ``range`` block; ``range.total`` is
+        returned alongside so callers can cross-check it against the number
+        of rows they actually received. See ``aql.py`` for why that matters.
+        """
+        r = self._http_long.post(
+            f"{self.base_url}/api/search/aql",
+            content=query,
+            headers={"Content-Type": "text/plain"},
+        )
+        r.raise_for_status()
+        return r.json().get("results", [])
+
+    @retry(**_RETRY)
+    def aql_count(self, criteria: str) -> int:
+        """Return ``range.total`` for ``items.find(<criteria>)`` with no projection.
+
+        Deliberately issues the query with **no** ``include()`` clause, which
+        is the only form guaranteed not to collapse rows (see ``aql.py``).
+        Used as an independent row-count reference.
+        """
+        r = self._http_long.post(
+            f"{self.base_url}/api/search/aql",
+            content=f"items.find({criteria})",
+            headers={"Content-Type": "text/plain"},
+        )
+        r.raise_for_status()
+        return int(r.json().get("range", {}).get("total", 0))
+
     def export_system(self, export_path: Path) -> None:
         """Trigger a system export with excludeContent=true.
 

@@ -210,6 +210,24 @@ class Settings(BaseSettings):
 
     propagate_deletes: bool = True
 
+    # Safety brake on deletion propagation. A cycle whose removal set exceeds
+    # this fraction of the previous baseline is refused outright: no archive,
+    # no cursor advance, retried next cycle against the same baseline.
+    #
+    # Enumeration moved from walking a system-export tree to an AQL query,
+    # which changed the shape of the failure mode rather than removing it. A
+    # filesystem walk fails loudly (missing directory, I/O error); a query can
+    # come back short and still look healthy, whether from a projection that
+    # collapses rows, a partial result, a permissions change hiding a repo, or
+    # a repo briefly unavailable. Any of those would read as mass deletion and
+    # be mirrored to the destination.
+    #
+    # The brake is deliberately cause-agnostic: it does not try to work out why
+    # the enumeration shrank, only that it shrank more than a mirror ever
+    # should in one cycle. Set to 1.0 to disable (a cycle may then delete
+    # everything), or 0 to refuse any deletion at all.
+    max_delete_fraction: float = Field(default=0.05, ge=0.0, le=1.0)
+
     # Repos to drop before they enter the snapshot. The system export
     # writes every repo on the source, including JFrog-internal ones that
     # either fail to import on the destination or are platform-managed

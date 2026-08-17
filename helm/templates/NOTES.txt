@@ -46,13 +46,6 @@ namespace (under `artifactory.artifactory`):
               - key: {{ .Values.binarystore.configFrom.key | quote }}
                 path: {{ .Values.binarystore.configFrom.key | quote }}
 {{- end }}
-{{- if .Values.binarystore.existingSecret }}
-        # Object-storage credentials, for when binarystore.xml cannot supply
-        # them (Artifactory rewrites them encrypted in its own copy).
-        - name: airlift-binarystore
-          secret:
-            secretName: {{ .Values.binarystore.existingSecret | quote }}
-{{- end }}
 {{- if .Values.binarystore.caCert.existingConfigMap }}
         # CA bundle for the object-storage endpoint (may differ from the CA
         # fronting Artifactory itself).
@@ -103,6 +96,14 @@ namespace (under `artifactory.artifactory`):
               value: {{ printf "%s/%s" .Values.binarystore.configFrom.mountPath .Values.binarystore.configFrom.key | quote }}
 {{- end }}
 {{- if .Values.binarystore.existingSecret }}
+            # Object-storage credentials, for when binarystore.xml cannot
+            # supply them (Artifactory rewrites them encrypted in its own
+            # copy). They reach airlift as env vars only; there is no volume
+            # to mount. Every ref is optional so one Secret shape serves both
+            # an S3 store (accessKey/secretKey) and Azure (accountKey), which
+            # also means a key name that does not match resolves to empty and
+            # airlift reports the credential as unset. Adjust the key names
+            # below to whatever the Secret actually uses.
             - name: AIRLIFT_BINARYSTORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -144,11 +145,6 @@ namespace (under `artifactory.artifactory`):
 {{- if .Values.binarystore.configFrom.existingSecret }}
             - name: airlift-binarystore-config
               mountPath: {{ .Values.binarystore.configFrom.mountPath }}
-              readOnly: true
-{{- end }}
-{{- if .Values.binarystore.existingSecret }}
-            - name: airlift-binarystore
-              mountPath: {{ .Values.binarystore.mountPath }}
               readOnly: true
 {{- end }}
 {{- if .Values.binarystore.caCert.existingConfigMap }}

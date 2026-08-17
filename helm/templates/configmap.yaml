@@ -36,6 +36,7 @@ data:
     included_repos: {{ .Values.includedRepos | toJson }}
     max_archive_bytes: {{ .Values.maxArchiveBytes | quote }}
     spool_min_free_bytes: {{ .Values.spoolMinFreeBytes | quote }}
+    max_delete_fraction: {{ .Values.maxDeleteFraction }}
     snapshot_retention_hours: {{ .Values.snapshotRetentionHours }}
     snapshot_retention_days: {{ .Values.snapshotRetentionDays }}
     snapshot_retention_months: {{ .Values.snapshotRetentionMonths }}

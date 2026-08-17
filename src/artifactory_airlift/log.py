@@ -35,7 +35,7 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "unknown_mode": "Unknown mode: {mode}.",
 
     # Sender lifecycle.
-    "sender.cycle_start": "Cycle starting; running Artifactory system export.",
+    "sender.cycle_start": "Cycle starting; enumerating the source.",
     "sender.cycle_skipped_pending": "Skipping cycle: {pending_count} archive(s) still in spool awaiting transport.",
     "sender.startup_sweep": "Startup sweep: removed {partials_removed} orphan .partial file(s) and {staging_dirs_removed} staging dir(s).",
     "sender.repos_excluded": "Excluding {count} repo(s) from sync: {repos}",
@@ -48,6 +48,17 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "sender.diff_computed": "Diff vs prev={prev_cycle_id}: {added} added, {removed} removed.",
     "sender.per_repo_changes": "Per-repo changes: {summary}",
     "sender.no_changes": "No changes; cursor advanced.",
+    "sender.metadata_synthesised": "Metadata tree synthesised for {entries} artifact(s).",
+    "sender.metadata_unresolved": (
+        "Dropped {count} entr(ies) whose metadata was gone by the time we asked for "
+        "it; they were deleted between enumeration and synthesis."
+    ),
+    "sender.delete_brake_tripped": (
+        "REFUSING cycle: {removed} of {baseline} artifacts would be deleted "
+        "({fraction} of the mirror, limit {limit}). Cursor not advanced, so the next "
+        "cycle re-runs the same diff. Raise max_delete_fraction only if this is a "
+        "deletion you meant."
+    ),
     "sender.archive_finalized": "Archive ready: {path} ({size_human}, {blob_count} blob(s), {repo_count} repo(s)).",
     "sender.cycle_chunked": "Cycle split into {chunk_total} chunks (raw {raw_bytes_human} > threshold {threshold_human}).",
     "sender.chunk_finalized": "Chunk {chunk_seq}/{chunk_total} ready: {path} ({size_human}, {blob_count} blob(s), {repo_count} repo(s)).",
@@ -79,9 +90,25 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "receiver.cycle_failed": "Cycle failed (see traceback).",
     "receiver.archive_failed": "Archive processing failed; see traceback.",
 
+    # Enumeration and metadata synthesis.
+    "aql.enumerated": "Enumerated {rows} row(s) from the source.",
+    "aql.rows_without_sha1": (
+        "Skipped {count} artifact(s) with no sha1 yet; they ship once Artifactory "
+        "has checksummed them."
+    ),
+    "aql.filter_not_applied": (
+        "The repository filter did not take effect server-side: {count} row(s) "
+        "were dropped here instead ({summary}). Correct, but the cycle is "
+        "fetching rows it discards."
+    ),
+    "synth.tree_written": (
+        "Metadata tree written: {written} artifact(s), {unresolved} unresolved."
+    ),
+    "synth.property_key_skipped": (
+        "Property key {key} on {repo} is not a legal XML element name; dropped."
+    ),
+
     # Artifactory client passthrough.
-    "export.start": "Artifactory: starting system export to {path}.",
-    "export.done": "Artifactory: system export complete.",
     "import.repositories_done": "Artifactory: import_repositories returned.",
 
     # Archive / export internals.
@@ -163,6 +190,10 @@ _EXTRA_CONSUMED: dict[str, set[str]] = {
     "archive.built": {"size_bytes", "total_bytes", "repos"},
     "receiver.extract_start": {"size_bytes"},
     "receiver.manifest_loaded": {"total_bytes", "repos"},
+    # The synthesised tree lives under the state dir; the path is noise on
+    # every cycle and the counts are what an operator reads.
+    "synth.tree_written": {"path"},
+    "aql.filter_not_applied": {"repos"},
 }
 
 
