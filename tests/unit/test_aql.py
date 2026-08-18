@@ -334,3 +334,73 @@ def test_fetch_metadata_issues_no_query_for_an_empty_delta() -> None:
     client = _FakeClient([])
     assert aql.fetch_metadata(client, []) == {}
     assert client.queries == []
+
+
+class _RecordingClient:
+    """Records every query and answers metadata ones from a fixed row set."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.queries: list[str] = []
+
+    def aql(self, query: str) -> list[dict]:
+        self.queries.append(query)
+        names = {r["name"] for r in self.rows if f'"name":"{r["name"]}"' in query}
+        return [r for r in self.rows if r["name"] in names]
+
+
+def test_metadata_queries_stay_under_the_length_limit() -> None:
+    """Artifactory rejects a query over 6000 characters outright.
+
+        HTTP 400  AQL query is too long; please reduce the query length to
+                  less than 6000 chars
+
+    The metadata query names every changed artifact as its own clause, so a
+    cold start on a populated repository sails past that limit and the whole
+    cycle fails. Measured against 7.146.10 before the fix: 57 clauses passed,
+    60 failed.
+    """
+    entries = [
+        ArtifactEntry(
+            repo_key="repo-a",
+            repo_path=f"deep/nested/directory/structure/artifact-{i:04d}.bin",
+            sha1=f"{i:040x}",
+            size=1,
+        )
+        for i in range(300)
+    ]
+    rows = [
+        {
+            "repo": "repo-a",
+            "path": "deep/nested/directory/structure",
+            "name": f"artifact-{i:04d}.bin",
+            "actual_sha1": f"{i:040x}",
+            "size": 1,
+        }
+        for i in range(300)
+    ]
+    client = _RecordingClient(rows)
+
+    out = aql.fetch_metadata(client, entries)
+
+    assert len(client.queries) > 1
+    assert all(len(q) <= aql._MAX_QUERY_CHARS for q in client.queries)
+    # Every artifact still resolves, so nothing is dropped by the batching.
+    assert len(out) == 300
+
+
+def test_batching_keeps_every_clause_exactly_once() -> None:
+    clauses = [{"path": ".", "name": f"f{i}.bin"} for i in range(200)]
+    batches = list(aql._batch_clauses(clauses, budget=500))
+
+    assert sum(len(b) for b in batches) == len(clauses)
+    assert [c for b in batches for c in b] == clauses
+    assert all(b for b in batches)
+
+
+def test_a_clause_over_budget_is_still_sent() -> None:
+    """Silently skipping an artifact is worse than a query that fails loudly."""
+    huge = {"path": "x" * 900, "name": "big.bin"}
+    batches = list(aql._batch_clauses([huge], budget=100))
+
+    assert batches == [[huge]]

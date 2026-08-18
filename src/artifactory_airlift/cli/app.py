@@ -1000,7 +1000,11 @@ def _cell(value) -> str:
         if all(isinstance(v, (str, int, float)) for v in value):
             return ", ".join(str(v) for v in value)
         return f"[{len(value)} item(s)]"
-    return "" if value is None else str(value)
+    if value is None:
+        return ""
+    # Ledgers written by an older version can hold a multi-line string; a
+    # newline in a cell breaks the column alignment for every row after it.
+    return " ".join(str(value).split())
 
 
 def main(argv: list[str] | None = None) -> int:

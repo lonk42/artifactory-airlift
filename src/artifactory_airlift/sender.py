@@ -682,12 +682,36 @@ def _record_cycle(
     row = {"status": status, "at": int(time.time())}
     if started is not None:
         row["duration_ms"] = int((time.time() - started) * 1000)
-    row.update({k: v for k, v in fields.items() if v not in (None, [], {}, 0)})
+    row.update(
+        {k: _ledger_value(v) for k, v in fields.items() if v not in (None, [], {}, 0)}
+    )
     try:
         state.append_jsonl(ledger_path, row)
         _trim_ledger(ledger_path)
     except OSError as exc:
         logger.warning("sender.ledger_write_failed", error=str(exc))
+
+
+# Longest string kept in a ledger field. An exception message is the only
+# thing that gets near it, and a ledger row is a breadcrumb rather than a log
+# record: the full text was already logged when it happened.
+_LEDGER_FIELD_CHARS = 300
+
+
+def _ledger_value(value):
+    """Flatten a value into something a one-line-per-cycle ledger can hold.
+
+    Exception messages are the reason this exists. httpx renders a failed
+    status over two lines with a documentation URL on the second, so a raw
+    error string turns a ledger row into something that cannot be shown in a
+    table and is awkward to grep.
+    """
+    if isinstance(value, str):
+        flattened = " ".join(value.split())
+        if len(flattened) > _LEDGER_FIELD_CHARS:
+            return flattened[: _LEDGER_FIELD_CHARS - 1] + "\u2026"
+        return flattened
+    return value
 
 
 def _trim_ledger(ledger_path: Path) -> None:

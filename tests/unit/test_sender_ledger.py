@@ -198,3 +198,31 @@ def test_trim_leaves_a_file_within_the_slack_alone(tmp_path: Path) -> None:
     sender._trim_ledger(ledger)
 
     assert len(_read(ledger)) == rows
+
+
+def test_error_text_is_flattened_into_one_line(tmp_path: Path) -> None:
+    """httpx renders a failed status over two lines, with a URL on the second.
+
+    A ledger row is one line per cycle and gets read as a table, so the text
+    is collapsed on the way in. The full message was already logged.
+    """
+    ledger = tmp_path / "cycles.jsonl"
+    sender._record_cycle(
+        ledger,
+        status="failed",
+        note="Server error '503 ' for url 'http://localhost:8081/x'\nFor more "
+        "information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503",
+    )
+
+    row = _read(ledger)[0]
+    assert "\n" not in row["note"]
+    assert row["note"].startswith("Server error '503 ' for url")
+
+
+def test_a_very_long_message_is_truncated(tmp_path: Path) -> None:
+    ledger = tmp_path / "cycles.jsonl"
+    sender._record_cycle(ledger, status="failed", note="x" * 5000)
+
+    note = _read(ledger)[0]["note"]
+    assert len(note) == sender._LEDGER_FIELD_CHARS
+    assert note.endswith("…")

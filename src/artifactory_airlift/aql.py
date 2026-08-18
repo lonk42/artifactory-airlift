@@ -264,6 +264,42 @@ def write_snapshot(
     return len(entries)
 
 
+# Artifactory rejects a query over 6000 characters outright:
+#
+#   HTTP 400  AQL query is too long; please reduce the query length to less
+#             than 6000 chars
+#
+# The metadata query names every changed artifact in a repository as its own
+# "$or" clause, so the query grows with the delta and a cold start on a
+# populated repository sails past the limit. Batching keeps each request
+# under this budget, which leaves room for the criteria wrapper and the
+# include clause on top of the clauses themselves.
+_MAX_QUERY_CHARS = 6000
+_QUERY_BUDGET = 5000
+
+
+def _batch_clauses(
+    clauses: list[dict[str, Any]], budget: int = _QUERY_BUDGET
+) -> Iterator[list[dict[str, Any]]]:
+    """Split clauses into groups whose rendered length stays under ``budget``.
+
+    A single clause over budget still gets its own group rather than being
+    dropped: the query will fail loudly, which is the right outcome for a
+    path that long, and silently skipping an artifact is not.
+    """
+    group: list[dict[str, Any]] = []
+    length = 0
+    for clause in clauses:
+        size = len(json.dumps(clause, sort_keys=True, separators=(",", ":"))) + 1
+        if group and length + size > budget:
+            yield group
+            group, length = [], 0
+        group.append(clause)
+        length += size
+    if group:
+        yield group
+
+
 def fetch_metadata(
     client: "ArtifactoryClient",
     entries: Iterable[ArtifactEntry],
@@ -274,6 +310,10 @@ def fetch_metadata(
     repository's whole changed set is far cheaper than one request each, and
     the delta is small enough that returning the repository's full row set
     and filtering locally would waste bandwidth on a large repository.
+
+    Each repository's clauses are batched to stay under Artifactory's query
+    length limit (see ``_MAX_QUERY_CHARS``), so the number of requests grows
+    with the delta rather than one request failing the whole cycle.
 
     Properties are requested alongside, because a Docker repository will not
     function on the destination without its ``sha256`` property.
@@ -291,15 +331,34 @@ def fetch_metadata(
         for rp in sorted(paths):
             head, _, tail = rp.rpartition("/")
             clauses.append({"path": head or ".", "name": tail})
-        crit = json.dumps(
-            {"repo": repo_key, "type": "file", "$or": clauses},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        rows = client.aql(f"items.find({crit}){fields}")
-        for row in rows:
-            out[(row.get("repo") or "", _repo_path(row))] = row
+
+        got = 0
+        batches = 0
+        for batch in _batch_clauses(clauses):
+            crit = json.dumps(
+                {"repo": repo_key, "type": "file", "$or": batch},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            query = f"items.find({crit}){fields}"
+            if len(query) > _MAX_QUERY_CHARS:
+                logger.warning(
+                    "aql.metadata_query_oversized",
+                    repo=repo_key,
+                    chars=len(query),
+                    limit=_MAX_QUERY_CHARS,
+                    clauses=len(batch),
+                )
+            rows = client.aql(query)
+            batches += 1
+            got += len(rows)
+            for row in rows:
+                out[(row.get("repo") or "", _repo_path(row))] = row
         logger.debug(
-            "aql.metadata_fetched", repo=repo_key, wanted=len(paths), got=len(rows)
+            "aql.metadata_fetched",
+            repo=repo_key,
+            wanted=len(paths),
+            got=got,
+            batches=batches,
         )
     return out
