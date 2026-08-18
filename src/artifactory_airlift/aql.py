@@ -100,6 +100,7 @@ def _criteria(
     *,
     included_repos: set[str] | None = None,
     excluded_repos: set[str] | None = None,
+    extra: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the ``items.find`` criteria object.
 
@@ -130,8 +131,18 @@ def _criteria(
     crit: dict[str, Any] = {"type": "file"}
     if included_repos:
         crit["$or"] = [{"repo": {"$eq": r}} for r in sorted(included_repos)]
+    clauses: list[dict[str, Any]] = []
     if excluded_repos:
-        crit["$and"] = [{"repo": {"$ne": r}} for r in sorted(excluded_repos)]
+        clauses.extend({"repo": {"$ne": r}} for r in sorted(excluded_repos))
+    if extra:
+        # Ad-hoc selection (a time window, say) shares the one "$and" list
+        # rather than adding a second key, since a JSON object cannot carry
+        # "$and" twice. Verified against 7.146.10: a range must be written
+        # this way, as {"modified": {"$gt": a}, "modified": {"$lt": b}} would
+        # collapse to whichever clause survives the parse.
+        clauses.extend(extra)
+    if clauses:
+        crit["$and"] = clauses
     return json.dumps(crit, sort_keys=True, separators=(",", ":"))
 
 
@@ -151,12 +162,17 @@ def iter_artifacts(
     *,
     excluded_repos: set[str] | None = None,
     included_repos: set[str] | None = None,
+    extra_criteria: list[dict[str, Any]] | None = None,
 ) -> Iterator[ArtifactEntry]:
     """Yield one entry per artifact on the source.
 
     Mirrors ``export_unpacker.iter_artifacts`` so the sender can swap one for
     the other. Both filters are applied by the query (see ``_criteria``); the
     equivalent checks here are a safety net, not the mechanism.
+
+    ``extra_criteria`` appends further clauses to the query's ``$and``, which
+    is how the CLI selects a time window for an ad-hoc export. Cycles never
+    pass it, so the daemon's enumeration is unchanged.
 
     Keeping them is deliberate. A criteria clause that the server declines to
     apply is not an error: the response is a healthy 200 with more rows in it
@@ -174,7 +190,11 @@ def iter_artifacts(
     """
     excluded = excluded_repos or set()
     included = included_repos or set()
-    query = _criteria(included_repos=included_repos, excluded_repos=excluded_repos)
+    query = _criteria(
+        included_repos=included_repos,
+        excluded_repos=excluded_repos,
+        extra=extra_criteria,
+    )
     rows = client.aql(f"items.find({query}){_include(*_SNAPSHOT_FIELDS)}")
 
     logger.info("aql.enumerated", rows=len(rows))

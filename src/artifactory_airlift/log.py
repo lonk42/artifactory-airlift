@@ -336,13 +336,19 @@ def human_bytes(n: int | float) -> str:
     return f"{size:.1f}PiB"
 
 
-def configure(level: str | None = None) -> None:
+def configure(level: str | None = None, *, stream=None) -> None:
+    """Configure logging for the process.
+
+    ``stream`` defaults to stdout, which is what a sidecar wants: the log is
+    the product. The CLI passes stderr instead, so a library log line cannot
+    land in the middle of the JSON a command is writing to stdout.
+    """
     lvl = (level or os.environ.get("LOG_LEVEL", "INFO")).upper()
     fmt = os.environ.get("AIRLIFT_LOG_FORMAT", "console").lower()
 
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stdout,
+        stream=stream or sys.stdout,
         level=getattr(logging, lvl, logging.INFO),
     )
 

@@ -158,6 +158,9 @@ class AzureBlobStore:
     def _url(self, sha1: str) -> str:
         return f"{self._cfg.endpoint_url}/{self._cfg.container}/{quote(self._key(sha1))}"
 
+    def location(self, sha1: str) -> str:
+        return self._url(sha1)
+
     def describe(self) -> str:
         auth = (
             f"as {self._credential.describe()}"

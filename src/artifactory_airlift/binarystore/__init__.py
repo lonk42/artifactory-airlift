@@ -61,6 +61,16 @@ class BlobStore(Protocol):
     def close(self) -> None:
         """Release any underlying connections."""
 
+    def location(self, sha1: str) -> str:
+        """Where this store would look for ``sha1``: a path, or a URL.
+
+        Purely diagnostic, and deliberately independent of whether the blob
+        exists. A blob that is not where airlift looked is indistinguishable
+        from one Artifactory has not written yet (both read as a 404 and
+        defer), so being able to print the address without fetching it is
+        what separates a wrong key prefix from a genuine absence.
+        """
+
 
 class FilesystemBlobStore:
     """The original on-disk binarystore, wrapping :mod:`..filestore`.
@@ -92,6 +102,9 @@ class FilesystemBlobStore:
 
     def close(self) -> None:
         return None
+
+    def location(self, sha1: str) -> str:
+        return str(filestore.blob_path(self.root, sha1))
 
     def describe(self) -> str:
         return f"filesystem at {self.root}"

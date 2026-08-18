@@ -166,6 +166,9 @@ class S3BlobStore:
     def _url(self, sha1: str) -> str:
         return f"{self._bucket_url()}/{self._key(sha1)}"
 
+    def location(self, sha1: str) -> str:
+        return self._url(sha1)
+
     def describe(self) -> str:
         return (
             f"s3 bucket {self._cfg.bucket} at {self._cfg.endpoint_url} "

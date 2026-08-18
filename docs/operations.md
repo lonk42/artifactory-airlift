@@ -55,16 +55,21 @@ Alert on `binarystore_unavailable` and `parked_after_*` rather than on restart c
 
 ## Inspecting state
 
+The `airlift` command line reads all of this, and reports the same configuration the daemon resolved.
+See [the command line](cli.md).
+
 ```sh
-# Sender: snapshots, cursor, synthesised metadata trees
-kubectl -n <source-namespace> exec sts/artifactory -c airlift -- ls /var/airlift/state
+# One screen: daemon, backend, spool, cursor, last cycle
+kubectl -n <namespace> exec sts/artifactory -c airlift -- airlift status
 
-# Either side: pending archives at the top, processed under .done/
-kubectl -n <namespace> exec sts/artifactory -c airlift -- ls -R /var/airlift/spool
+# Cycle history for either side
+kubectl -n <namespace> exec sts/artifactory -c airlift -- airlift cycles
 
-# Receiver: the idempotency ledger, one line per cycle
-kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- cat /var/airlift/state/processed.jsonl
+# Everything recorded about one cycle
+kubectl -n <namespace> exec sts/artifactory -c airlift -- airlift show latest
 ```
+
+The underlying files are `state/snapshots/`, `state/cursor.json` and `state/cycles.jsonl` on the sender, `state/processed.jsonl` on the receiver, and `spool/` with applied archives under `spool/.done/` on both.
 
 ## Forcing a cycle
 
@@ -84,8 +89,10 @@ The diff reads that as deleting it from the destination, and the brake refuses t
 Change the setting, then clear the cursor:
 
 ```sh
-kubectl -n <source-namespace> exec sts/artifactory -c airlift -- rm -f /var/airlift/state/cursor.json
+kubectl -n <source-namespace> exec sts/artifactory -c airlift -- airlift cursor clear --yes
 ```
+
+`airlift plan` shows what the next cycle would do, including whether the brake would refuse it, before any of this.
 
 The next cycle is a cold start, which emits no removals and re-adds everything in the new scope.
 The re-add is cheap: the receiver finds the blobs already in its filestore and the import is idempotent.
@@ -105,6 +112,8 @@ kubectl -n <destination-namespace> exec sts/artifactory -c airlift -- \
 ```
 
 Reprocessing is safe: blobs are content-addressed and imports are idempotent.
+
+For one cycle rather than all of them, `airlift forget <cycle>` drops a single ledger row and `airlift replay <cycle>` moves an applied archive back into the spool.
 
 ## Common issues
 

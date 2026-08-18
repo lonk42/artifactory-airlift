@@ -19,6 +19,7 @@ def run(settings: Settings) -> int:
     snapshots_dir = state_dir / "snapshots"
     exports_dir = state_dir / "exports"
     cursor_path = state_dir / "cursor.json"
+    ledger_path = state_dir / "cycles.jsonl"
     lock_path = state_dir / "sender.lock"
 
     for p in (state_dir, snapshots_dir, exports_dir, settings.spool_dir):
@@ -43,6 +44,7 @@ def run(settings: Settings) -> int:
                 snapshots_dir=snapshots_dir,
                 exports_dir=exports_dir,
                 cursor_path=cursor_path,
+                ledger_path=ledger_path,
             )
     except RuntimeError as exc:
         logger.error("sender.lock_held", error=str(exc))
@@ -55,6 +57,7 @@ def _loop(
     snapshots_dir: Path,
     exports_dir: Path,
     cursor_path: Path,
+    ledger_path: Path | None = None,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
     store: binarystore.BlobStore | None = None
@@ -82,9 +85,11 @@ def _loop(
                     snapshots_dir=snapshots_dir,
                     exports_dir=exports_dir,
                     cursor_path=cursor_path,
+                    ledger_path=ledger_path,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("sender.cycle_failed")
+                _record_cycle(ledger_path, status="failed", note=str(exc))
             time.sleep(settings.cycle_seconds)
     finally:
         if store is not None:
@@ -100,9 +105,12 @@ def _cycle(
     snapshots_dir: Path,
     exports_dir: Path,
     cursor_path: Path,
+    ledger_path: Path | None = None,
 ) -> None:
+    started = time.time()
     if not client.ping():
         logger.warning("sender.ping_not_ok")
+        _record_cycle(ledger_path, status="ping-failed", started=started)
         return
 
     # "One delta in flight" gate. If a prior cycle's archives are still in
@@ -120,6 +128,13 @@ def _cycle(
             "sender.cycle_skipped_pending",
             pending_count=len(pending),
             pending=[p.name for p in pending],
+        )
+        _record_cycle(
+            ledger_path,
+            status="skipped-pending",
+            started=started,
+            note=f"{len(pending)} archive(s) still in spool",
+            archives=[p.name for p in pending],
         )
         return
 
@@ -222,6 +237,22 @@ def _cycle(
             # against the same baseline, so a transient short read recovers
             # by itself and a real mass deletion keeps tripping until an
             # operator raises the limit deliberately.
+            _record_cycle(
+                ledger_path,
+                status="brake-refused",
+                started=started,
+                cycle_id=cycle_id,
+                prev_cycle_id=prev_cycle_id,
+                snapshot_count=count,
+                repo_count=len(snapshot_repo_counts),
+                added=len(new_entries),
+                removed=len(removed_entries),
+                note=(
+                    f"{len(removed_entries)} of {baseline} "
+                    f"({fraction:.1%}) exceeds max_delete_fraction "
+                    f"{settings.max_delete_fraction}"
+                ),
+            )
             return
 
     if new_entries or removed_entries:
@@ -258,6 +289,15 @@ def _cycle(
             exports_dir=exports_dir,
         )
         logger.info("sender.no_changes", cycle_id=cycle_id)
+        _record_cycle(
+            ledger_path,
+            status="no-changes",
+            started=started,
+            cycle_id=cycle_id,
+            prev_cycle_id=prev_cycle_id,
+            snapshot_count=count,
+            repo_count=len(snapshot_repo_counts),
+        )
         return
 
     # Synthesise the metadata tree the receiver's import needs, covering only
@@ -300,6 +340,18 @@ def _cycle(
     if not ok:
         # Backpressure or other abort. Do not advance the cursor: next
         # cycle re-runs the diff against the same baseline.
+        _record_cycle(
+            ledger_path,
+            status="backpressure",
+            started=started,
+            cycle_id=cycle_id,
+            prev_cycle_id=prev_cycle_id,
+            snapshot_count=count,
+            repo_count=len(snapshot_repo_counts),
+            added=len(new_entries),
+            removed=len(removed_entries),
+            note="spool free space below the projected chunk size",
+        )
         return
 
     if deferred:
@@ -316,11 +368,32 @@ def _cycle(
             entry_count=dropped,
         )
 
+    archives = sorted(settings.spool_dir.glob(f"{cycle_id}*.tar.zst"))
+    _record_cycle(
+        ledger_path,
+        status="ok",
+        started=started,
+        cycle_id=cycle_id,
+        prev_cycle_id=prev_cycle_id,
+        snapshot_count=count,
+        repo_count=len(snapshot_repo_counts),
+        added=len(new_entries),
+        removed=len(removed_entries),
+        repos_added=dict(Counter(e.repo_key for e in new_entries)),
+        repos_removed=dict(Counter(e.repo_key for e in removed_entries)),
+        archives=[p.name for p in archives],
+        archive_bytes=sum(p.stat().st_size for p in archives),
+        chunk_total=len(archives),
+        deferred_blobs=len(deferred),
+        deferred_sha1s=sorted(deferred)[:_LEDGER_DEFERRED_SAMPLE],
+    )
+
     _advance_cursor(cursor_path, cycle_id)
     _prune_history(
         settings,
         snapshots_dir=snapshots_dir,
         exports_dir=exports_dir,
+        ledger_path=ledger_path,
     )
 
 
@@ -572,6 +645,69 @@ def _locate_export_contents(export_root: Path) -> Path:
     return export_root
 
 
+# How many rows of state/cycles.jsonl to retain, and the slack allowed above
+# that before a trim actually rewrites the file. The ledger is an operator
+# breadcrumb trail, not load-bearing state (unlike the receiver's
+# processed.jsonl, which drives idempotency), so it is trimmed by count rather
+# than kept forever. At a 30-second cycle this is about two days of history.
+_LEDGER_KEEP_ROWS = 5000
+_LEDGER_TRIM_SLACK = 1000
+
+# Deferred sha1s recorded per row. A handful is enough to start looking; the
+# count beside them is the number that matters.
+_LEDGER_DEFERRED_SAMPLE = 20
+
+
+def _record_cycle(
+    ledger_path: Path | None,
+    *,
+    status: str,
+    started: float | None = None,
+    **fields,
+) -> None:
+    """Append one row to the sender's cycle ledger.
+
+    The receiver has ``processed.jsonl`` and the sender had nothing
+    equivalent: the cursor records only the last cycle that succeeded, so
+    everything else (a cycle the brake refused, a cycle skipped because the
+    transport is behind, blobs deferred because they were not in the store
+    yet) lived in the log and nowhere else. That made history unanswerable
+    from state alone once the log had rotated.
+
+    Writing is best-effort. A cycle that did real work must not be reported
+    as failed because its breadcrumb could not be written.
+    """
+    if ledger_path is None:
+        return
+    row = {"status": status, "at": int(time.time())}
+    if started is not None:
+        row["duration_ms"] = int((time.time() - started) * 1000)
+    row.update({k: v for k, v in fields.items() if v not in (None, [], {}, 0)})
+    try:
+        state.append_jsonl(ledger_path, row)
+        _trim_ledger(ledger_path)
+    except OSError as exc:
+        logger.warning("sender.ledger_write_failed", error=str(exc))
+
+
+def _trim_ledger(ledger_path: Path) -> None:
+    """Keep the newest ``_LEDGER_KEEP_ROWS`` rows, rewritten atomically.
+
+    Only rewrites once the file has grown a whole slack allowance past the
+    target, so the common case is a plain append.
+    """
+    try:
+        lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= _LEDGER_KEEP_ROWS + _LEDGER_TRIM_SLACK:
+        return
+    keep = lines[-_LEDGER_KEEP_ROWS:]
+    tmp = ledger_path.with_suffix(ledger_path.suffix + f".tmp-{os.getpid()}")
+    tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    os.replace(tmp, ledger_path)
+
+
 def _advance_cursor(cursor_path: Path, cycle_id: str) -> None:
     state.write_json_atomic(
         cursor_path,
@@ -584,6 +720,7 @@ def _prune_history(
     *,
     snapshots_dir: Path,
     exports_dir: Path,
+    ledger_path: Path | None = None,
     now: float | None = None,
 ) -> None:
     # Snapshots: GFS retention. Each tier keeps the newest snapshot per
@@ -613,6 +750,9 @@ def _prune_history(
     if len(entries) > settings.history_keep:
         for p in entries[: len(entries) - settings.history_keep]:
             shutil.rmtree(p, ignore_errors=True)
+
+    if ledger_path is not None and ledger_path.exists():
+        _trim_ledger(ledger_path)
 
 
 def _resolve_excluded_repos(
