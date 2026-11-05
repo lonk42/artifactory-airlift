@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import aql, archive, binarystore, log, metadata_synth, state
+from . import aql, archive, binarystore, log, metadata_synth, shipping, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
@@ -61,9 +61,15 @@ def _loop(
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
     store: binarystore.BlobStore | None = None
+    shipper = shipping.Shipper(settings) if settings.shipping.enabled else None
     attempt = 0
     try:
         while True:
+            # Ship before the cycle as well as after it, so archives left
+            # over from before a restart go up before the gate is consulted.
+            if shipper is not None:
+                shipper.run_once()
+
             # Resolved in the loop rather than before it: an unusable
             # binarystore leaves this cycle idle instead of ending the
             # process, which would take Artifactory's pod down with it.
@@ -90,8 +96,12 @@ def _loop(
             except Exception as exc:
                 logger.exception("sender.cycle_failed")
                 _record_cycle(ledger_path, status="failed", note=str(exc))
+            if shipper is not None:
+                shipper.run_once()
             time.sleep(settings.cycle_seconds)
     finally:
+        if shipper is not None:
+            shipper.close()
         if store is not None:
             store.close()
         client.close()
@@ -133,7 +143,11 @@ def _cycle(
             ledger_path,
             status="skipped-pending",
             started=started,
-            note=f"{len(pending)} archive(s) still in spool",
+            note=(
+                f"{len(pending)} archive(s) awaiting upload to the ship target"
+                if settings.shipping.enabled
+                else f"{len(pending)} archive(s) still in spool"
+            ),
             archives=[p.name for p in pending],
         )
         return
@@ -715,21 +729,8 @@ def _ledger_value(value):
 
 
 def _trim_ledger(ledger_path: Path) -> None:
-    """Keep the newest ``_LEDGER_KEEP_ROWS`` rows, rewritten atomically.
-
-    Only rewrites once the file has grown a whole slack allowance past the
-    target, so the common case is a plain append.
-    """
-    try:
-        lines = ledger_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    if len(lines) <= _LEDGER_KEEP_ROWS + _LEDGER_TRIM_SLACK:
-        return
-    keep = lines[-_LEDGER_KEEP_ROWS:]
-    tmp = ledger_path.with_suffix(ledger_path.suffix + f".tmp-{os.getpid()}")
-    tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
-    os.replace(tmp, ledger_path)
+    """Keep the newest ``_LEDGER_KEEP_ROWS`` rows, rewritten atomically."""
+    state.trim_jsonl(ledger_path, keep=_LEDGER_KEEP_ROWS, slack=_LEDGER_TRIM_SLACK)
 
 
 def _advance_cursor(cursor_path: Path, cycle_id: str) -> None:

@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("archives", "Archives in the spool, and optionally those already done.")
     p.add_argument(
-        "--where", choices=("spool", "done", "all"), default="spool"
+        "--where", choices=("spool", "done", "shipped", "all"), default="spool"
     )
     p.set_defaults(func=cmd_archives)
 
@@ -277,6 +277,34 @@ def cmd_status(args) -> int:
         render.section("airlift", render.kv(header)),
         render.section("spool", render.kv(spool_lines)),
     ]
+
+    if "shipping" in data:
+        sh = data["shipping"]
+        last_ok = sh.get("last_shipped") or {}
+        last = sh.get("last_row") or {}
+        ship_lines = [
+            ("target", f"{sh['method']} {sh['target']}"),
+            (
+                "last shipped",
+                f"{last_ok['archive']} {fmt_age(last_ok.get('at'))}"
+                if last_ok
+                else "(nothing yet)",
+            ),
+            (
+                "kept",
+                f"{sh['kept_count']} archive(s), {human_bytes(sh['kept_bytes'])} "
+                f"in .shipped/ for {sh['keep_hours']}h",
+            ),
+        ]
+        if sh["consecutive_failures"]:
+            ship_lines.append(
+                (
+                    "FAILING",
+                    f"{sh['consecutive_failures']} attempt(s) in a row: "
+                    f"{last.get('error', '')}",
+                )
+            )
+        parts.append(render.section("shipping", render.kv(ship_lines)))
 
     if "sender" in data:
         s = data["sender"]

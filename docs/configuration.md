@@ -87,6 +87,45 @@ The brake refuses such a cycle.
 To change scope deliberately, change the setting and then delete `state/cursor.json` on the sender, which makes the next cycle a cold start that emits no removals.
 See [the deletion brake](architecture.md#the-deletion-brake).
 
+## Shipping archives to Azure Blob
+
+The sender can upload each finished archive to an Azure Blob container, for a transport that collects from there.
+Archives are still built in the spool.
+
+```yaml
+shipping:
+  enabled: true
+  method: azure
+  keep_hours: 72
+  azure:
+    account: exportacct
+    container: outbound
+    prefix: site-a
+```
+
+Each archive is uploaded as `<prefix>/<archive name>` in lexical order, then moved to `spool/.shipped/`, kept there for `keep_hours`.
+Moving it out of the spool root lets the next cycle start, so the sender does not wait for the container to be emptied.
+Removing collected blobs is the transport's job.
+
+`azure` is the only method.
+The container must already exist.
+In the Helm chart the same block is `shipping:`, with `keepHours` in place of `keep_hours`.
+As environment variables, levels join with a double underscore: `AIRLIFT_SHIPPING__AZURE__CONTAINER`.
+
+A blob is visible only once its upload is complete.
+Each blob carries `Content-MD5`, checked by Azure on upload, and a `sha256` metadata entry for the collector to verify against.
+A failed upload leaves the archive in the spool and is retried next cycle; later archives wait so chunks arrive in order.
+
+Authentication is the platform identity only, found the same way as for the [binarystore](binarystore.md#azure-without-a-key).
+The identity has to reach the airlift container and needs Storage Blob Data Contributor on the target container.
+A missing identity logs `shipping.target_unavailable`; a missing role fails each upload with HTTP 403 `AuthorizationPermissionMismatch` and logs `shipping.upload_failed`.
+In both cases the sender stops cycling with `sender.cycle_skipped_pending`.
+
+`airlift status` shows the target, the last archive shipped and any run of failures.
+`airlift doctor` checks the identity, the container and write permission.
+The write check stages an uncommitted block under `<prefix>/.airlift-ship-probe-<epoch>`, which does not appear in a container listing and is discarded by Azure after 7 days.
+Each upload is recorded in `state/shipped.jsonl`.
+
 ## Reference
 
 | Key (yaml) | Env | Default | Description |
@@ -109,6 +148,13 @@ See [the deletion brake](architecture.md#the-deletion-brake).
 | `done_keep_hours` | `AIRLIFT_DONE_KEEP_HOURS` | `72` | Receiver-only. How long to retain processed archives under `spool/.done/`. `0` keeps them forever. |
 | `max_archive_bytes` | `AIRLIFT_MAX_ARCHIVE_BYTES` | `8Gi` | Sender-only per-archive raw blob budget. Takes a k8s quantity or a plain integer. Exceeding it splits the cycle into `<cycle_id>-cNNN.tar.zst` chunks. `0` disables splitting. |
 | `spool_min_free_bytes` | `AIRLIFT_SPOOL_MIN_FREE_BYTES` | `2Gi` | Sender-only free-space floor on the spool volume. Each chunk needs `free >= this + projected size` or the cycle aborts without advancing the cursor. |
+| `shipping.enabled` | `AIRLIFT_SHIPPING__ENABLED` | `false` | Sender-only. Upload finished archives to an object store. See [shipping archives](#shipping-archives-to-azure-blob). |
+| `shipping.method` | `AIRLIFT_SHIPPING__METHOD` | `azure` | Where to upload. `azure` is the only method. |
+| `shipping.keep_hours` | `AIRLIFT_SHIPPING__KEEP_HOURS` | `72` | How long shipped archives stay in `spool/.shipped/`. `0` deletes them after upload. |
+| `shipping.azure.account` | `AIRLIFT_SHIPPING__AZURE__ACCOUNT` | `""` | Storage account. Required when enabled, unless `shipping.azure.endpoint` is set. |
+| `shipping.azure.container` | `AIRLIFT_SHIPPING__AZURE__CONTAINER` | `""` | Container. Required when enabled. |
+| `shipping.azure.prefix` | `AIRLIFT_SHIPPING__AZURE__PREFIX` | `""` | Key prefix inside the container. |
+| `shipping.azure.endpoint` | `AIRLIFT_SHIPPING__AZURE__ENDPOINT` | `https://<account>.blob.core.windows.net` | Blob endpoint override, for a private endpoint name or a non-public cloud. |
 | `snapshot_retention_hours` | `AIRLIFT_SNAPSHOT_RETENTION_HOURS` | `0` | Sender-only. Keep the newest snapshot per hour-bucket for N hours. |
 | `snapshot_retention_days` | `AIRLIFT_SNAPSHOT_RETENTION_DAYS` | `3` | Sender-only. Keep the newest snapshot per day-bucket for N days, UTC. |
 | `snapshot_retention_months` | `AIRLIFT_SNAPSHOT_RETENTION_MONTHS` | `0` | Sender-only. Keep the newest snapshot per calendar month for N months. |

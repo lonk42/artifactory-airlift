@@ -112,6 +112,10 @@ def done_dir(settings: Settings) -> Path:
     return settings.spool_dir / ".done"
 
 
+def shipped_dir(settings: Settings) -> Path:
+    return settings.spool_dir / ".shipped"
+
+
 def lock_path(settings: Settings) -> Path:
     return settings.state_dir / f"{settings.mode}.lock"
 
@@ -329,7 +333,8 @@ def redact(name: str, value: Any) -> Any:
 
 
 def env_var_for(field: str) -> str:
-    return f"AIRLIFT_{field.upper()}"
+    """Env var for a setting; dotted nested names join with ``__``."""
+    return "AIRLIFT_" + "__".join(part.upper() for part in field.split("."))
 
 
 def env_value(field: str) -> str | None:

@@ -38,7 +38,7 @@ sender
 Environment variables outrank the mounted ConfigMap, and the chart renders every key into that ConfigMap whether or not it was set, so a file value that the environment overrides is listed as masked rather than dropped from the output.
 Credentials are replaced with their length.
 
-`airlift doctor` runs the checks actively and exits 2 if any fail: directory permissions, spool headroom, the import path restriction, ping, whether the token can list repositories, and backend resolution.
+`airlift doctor` runs the checks actively and exits 2 if any fail: directory permissions, spool headroom, the import path restriction, ping, whether the token can list repositories, backend resolution, and the ship target when shipping is enabled.
 Add `--write-probe` to write and remove a probe object; the receiver does this anyway, the sender does not, because the source only needs read access.
 
 `airlift repos` lists every repository with its package type and whether the current allowlist and denylists admit it, which answers what a cycle will cover before a cycle answers it.
@@ -64,7 +64,7 @@ Times accept ISO 8601, epoch seconds, or a window such as `7d`; bare timestamps 
 | `airlift show <cycle>` | Every trace of one cycle: ledger rows, snapshot, metadata tree, archives and their manifests |
 | `airlift snapshots` | Retained baselines, entry counts, and which one the cursor points at |
 | `airlift diff <a> <b>` | Added and removed between two snapshots, with the deletion brake verdict |
-| `airlift archives` | Archives in the spool, `--where done` for those already applied |
+| `airlift archives` | Archives in the spool, `--where done` for those already applied, `--where shipped` for those uploaded |
 | `airlift archive <ref>` | One archive's manifest, `--entries` for its contents, `--verify` to rehash every blob |
 
 `latest` and `prev` work anywhere a cycle id, snapshot or archive is expected.
@@ -91,6 +91,7 @@ airlift export --since 30d --repo airlift-npm-local --yes
 ```
 
 Archives land in the spool, where the transport picks them up like any other.
+With shipping enabled the daemon uploads them on its next pass.
 An archive sitting in the spool holds the next ordinary cycle until it is drained, which is the same rule that applies to a cycle's own output.
 `--out DIR` writes elsewhere; the spool free-space floor does not apply to a destination named explicitly.
 

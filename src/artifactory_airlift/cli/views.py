@@ -19,6 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
 from tenacity import stop_after_attempt
 
 from .. import archive as archive_mod
@@ -60,6 +61,8 @@ def status(settings: Settings, *, offline: bool = False) -> dict[str, Any]:
     out["spool"] = spool_summary(settings)
     if settings.mode == "sender":
         out["sender"] = _sender_status(settings)
+        if settings.shipping.enabled:
+            out["shipping"] = shipping_summary(settings)
     else:
         out["receiver"] = _receiver_status(settings)
     return out
@@ -191,6 +194,31 @@ def _incomplete_chunk_sets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def shipping_summary(settings: Settings) -> dict[str, Any]:
+    """Where archives are shipped to, and how the last uploads went."""
+    from .. import shipping
+
+    rows = common.read_ledger(shipping.ledger_path(settings))
+    ok = [r for r in rows if r.get("status") in ("ok", "already-present")]
+    failed_streak = 0
+    for r in reversed(rows):
+        if r.get("status") != "failed":
+            break
+        failed_streak += 1
+    kept = shipping.shipped_dir(settings)
+    kept_files = sorted(kept.glob("*.tar.zst")) if kept.is_dir() else []
+    return {
+        "method": settings.shipping.method,
+        "target": shipping.describe_target(settings),
+        "keep_hours": settings.shipping.keep_hours,
+        "last_shipped": ok[-1] if ok else None,
+        "last_row": rows[-1] if rows else None,
+        "consecutive_failures": failed_streak,
+        "kept_count": len(kept_files),
+        "kept_bytes": sum(f.stat().st_size for f in kept_files),
+    }
+
+
 def spool_summary(settings: Settings) -> dict[str, Any]:
     pending = sorted(settings.spool_dir.glob("*.tar.zst"))
     partials = sorted(settings.spool_dir.glob("*.tar.zst.partial"))
@@ -239,6 +267,50 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+_MISSING = object()
+
+
+def _collect_fields(
+    model: BaseModel,
+    file_values: Any,
+    path: tuple[str, ...],
+    out: list[dict[str, Any]],
+) -> None:
+    """One row per leaf setting, nested models flattened to dotted names.
+
+    ``shipping.azure.container`` is reported as its own field with its own env
+    var (``AIRLIFT_SHIPPING__AZURE__CONTAINER``), so the origin column stays
+    per setting instead of per block.
+    """
+    for name in sorted(type(model).model_fields):
+        value = getattr(model, name)
+        here = (*path, name)
+        file_value = (
+            file_values.get(name, _MISSING) if isinstance(file_values, dict) else _MISSING
+        )
+        if isinstance(value, BaseModel) and not isinstance(value, Settings):
+            _collect_fields(value, file_value, here, out)
+            continue
+        dotted = ".".join(here)
+        env_raw = common.env_value(dotted)
+        in_file = file_value is not _MISSING
+        if env_raw is not None:
+            origin = "env"
+        elif in_file:
+            origin = "file"
+        else:
+            origin = "default"
+        entry = {
+            "name": dotted,
+            "value": _jsonable(common.redact(dotted, value)),
+            "origin": origin,
+            "env_var": common.env_var_for(dotted),
+        }
+        if origin == "env" and in_file:
+            entry["masked_file_value"] = _jsonable(common.redact(dotted, file_value))
+        out.append(entry)
+
+
 def effective_config(
     settings: Settings,
     file_values: dict[str, Any],
@@ -252,28 +324,8 @@ def effective_config(
     "airlift is using X" are different statements. A file value that env has
     overridden is reported as masked rather than silently dropped.
     """
-    fields = []
-    for name in sorted(type(settings).model_fields):
-        value = getattr(settings, name)
-        env_raw = common.env_value(name)
-        in_file = name in file_values
-        if env_raw is not None:
-            origin = "env"
-        elif in_file:
-            origin = "file"
-        else:
-            origin = "default"
-        entry = {
-            "name": name,
-            "value": _jsonable(common.redact(name, value)),
-            "origin": origin,
-            "env_var": common.env_var_for(name),
-        }
-        if origin == "env" and in_file:
-            entry["masked_file_value"] = _jsonable(
-                common.redact(name, file_values[name])
-            )
-        fields.append(entry)
+    fields: list[dict[str, Any]] = []
+    _collect_fields(settings, file_values, (), fields)
     return {
         "config_path": str(config_path or common.DEFAULT_CONFIG_PATH),
         "config_present": bool(file_values),
@@ -282,6 +334,43 @@ def effective_config(
 
 
 # -- doctor -----------------------------------------------------------------
+
+
+def _doctor_ship_target(settings: Settings, add) -> None:
+    """Check the archive ship target: identity, container, write permission.
+
+    The write check always runs, since shipping is nothing but writes. It
+    stages an uncommitted block, which the transport collecting from the
+    container never sees.
+    """
+    from .. import shipping
+
+    if settings.mode != "sender":
+        add(
+            "ship target",
+            None,
+            "shipping.enabled is set but shipping is sender only; ignored here",
+            fatal=False,
+        )
+        return
+    try:
+        target = shipping.build_target(settings)
+    except Exception as exc:
+        add("ship target", False, str(exc))
+        return
+    try:
+        add("ship target", True, target.describe())
+        try:
+            add("ship container", True, target.check_container())
+        except Exception as exc:
+            add("ship container", False, str(exc))
+            return
+        try:
+            add("ship write", True, target.check_write())
+        except Exception as exc:
+            add("ship write", False, str(exc))
+    finally:
+        target.close()
 
 
 def doctor(settings: Settings, *, write_probe: bool = False) -> dict[str, Any]:
@@ -365,6 +454,10 @@ def doctor(settings: Settings, *, write_probe: bool = False) -> dict[str, Any]:
     finally:
         if store is not None:
             store.close()
+
+    # Ship target.
+    if settings.shipping.enabled:
+        _doctor_ship_target(settings, add)
 
     # Role-specific state.
     if settings.mode == "sender":
@@ -714,6 +807,8 @@ def archives(settings: Settings, *, where: str = "spool") -> dict[str, Any]:
         directories.append((settings.spool_dir, "spool"))
     if where in ("done", "all"):
         directories.append((common.done_dir(settings), "done"))
+    if where in ("shipped", "all"):
+        directories.append((common.shipped_dir(settings), "shipped"))
 
     rows = []
     for directory, label in directories:
@@ -758,7 +853,11 @@ def find_archive(settings: Settings, ref: str) -> Path:
 
     if ref in ("latest", "prev"):
         found = []
-        for directory in (settings.spool_dir, common.done_dir(settings)):
+        for directory in (
+            settings.spool_dir,
+            common.done_dir(settings),
+            common.shipped_dir(settings),
+        ):
             if directory.is_dir():
                 found.extend(directory.glob("*.tar.zst"))
         found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -770,7 +869,11 @@ def find_archive(settings: Settings, ref: str) -> Path:
             raise CLIError("only one archive present, so 'prev' resolves to nothing")
         return found[1]
 
-    for directory in (settings.spool_dir, common.done_dir(settings)):
+    for directory in (
+            settings.spool_dir,
+            common.done_dir(settings),
+            common.shipped_dir(settings),
+        ):
         for name in (ref, f"{ref}.tar.zst"):
             path = directory / name
             if path.is_file():

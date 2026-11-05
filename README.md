@@ -42,6 +42,8 @@ Tested against Artifactory 7.146.x.
   [Detail](docs/configuration.md#repository-scope)
 - **Deltas chunked to fit the spool volume**, with backpressure when it fills and an ordering guarantee so a partial chunk set is never applied.
   [Detail](docs/architecture.md#chunked-deltas)
+- **Shipping archives to Azure Blob**, for a transport that collects from a storage container instead of the spool volume.
+  [Detail](docs/configuration.md#shipping-archives-to-azure-blob)
 - **Idempotent replay.**
   Archives are content-addressed; reprocessing one changes nothing.
   [Detail](docs/architecture.md#failure-semantics)
@@ -116,6 +118,9 @@ Replay is safe.
 
 Until the transport collects the last delta the sender skips its cycles rather than piling up work, logging `sender.cycle_skipped_pending`.
 [Detail](docs/architecture.md#one-delta-in-flight)
+
+If the transport collects from Azure Blob, enable `shipping` and the sender uploads each archive there after building it.
+[Detail](docs/configuration.md#shipping-archives-to-azure-blob)
 
 ## Limitations
 

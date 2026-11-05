@@ -22,6 +22,9 @@ def run(settings: Settings) -> int:
     for p in (state_dir, settings.spool_dir, done_dir):
         p.mkdir(parents=True, exist_ok=True)
 
+    if settings.shipping.enabled:
+        logger.warning("shipping.ignored_on_receiver")
+
     # The transport mechanism may have crashed mid-write, leaving a
     # ``.partial`` file in spool. The cycle loop's ``*.tar.zst`` glob
     # ignores partials so they would not cause processing issues, but

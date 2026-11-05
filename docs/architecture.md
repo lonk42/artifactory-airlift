@@ -157,6 +157,8 @@ The sender refuses to start a cycle while a finalised archive from a prior cycle
 Without the gate, a stalled transport still produces a snapshot and a synthesised tree per cycle, and those accumulate on the state PVC because pruning only runs after a cycle succeeds.
 With it, a stalled transport produces no side effects and the cursor stays put.
 
+With [shipping](configuration.md#shipping-archives-to-azure-blob) enabled, a completed upload moves the archive out of the spool root, so the gate waits on the upload and not on the collector.
+
 `.partial` files do not trip the gate.
 They are left by a SIGKILL during a build, are never picked up by the receiver, and are removed by a startup sweep on both sides along with orphaned `spool/.staging/<cycle_id>/` directories.
 A non-empty sweep logs `sender.startup_sweep` / `receiver.startup_sweep`; a clean tree is silent.

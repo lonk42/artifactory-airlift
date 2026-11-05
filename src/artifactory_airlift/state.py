@@ -34,6 +34,24 @@ def append_jsonl(path: Path, entry: dict) -> None:
         os.fsync(fh.fileno())
 
 
+def trim_jsonl(path: Path, *, keep: int, slack: int) -> None:
+    """Keep the newest ``keep`` lines of a JSONL file, rewritten atomically.
+
+    Only rewrites once the file has grown ``slack`` lines past the target, so
+    the common case costs a read and nothing else. For breadcrumb ledgers
+    only; never point it at state that drives idempotency.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= keep + slack:
+        return
+    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}")
+    tmp.write_text("\n".join(lines[-keep:]) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def read_jsonl(path: Path) -> Iterator[dict]:
     if not path.exists():
         return

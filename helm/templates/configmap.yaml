@@ -41,3 +41,18 @@ data:
     snapshot_retention_days: {{ .Values.snapshotRetentionDays }}
     snapshot_retention_months: {{ .Values.snapshotRetentionMonths }}
     log_level: {{ .Values.logLevel | quote }}
+    {{- with .Values.shipping }}
+    {{- if .enabled }}
+    shipping:
+      enabled: true
+      method: {{ .method | quote }}
+      keep_hours: {{ .keepHours }}
+      {{- if eq .method "azure" }}
+      azure:
+        account: {{ .azure.account | quote }}
+        container: {{ .azure.container | quote }}
+        prefix: {{ .azure.prefix | quote }}
+        endpoint: {{ .azure.endpoint | quote }}
+      {{- end }}
+    {{- end }}
+    {{- end }}

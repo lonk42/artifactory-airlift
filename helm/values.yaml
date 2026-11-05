@@ -155,6 +155,25 @@ binarystore:
   # is what lets large artifacts through at all.
   multipartThreshold: 256Mi
 
+# Optional, sender only: upload each finished archive to an object store,
+# for a transport that collects from there rather than from the spool PVC.
+# Archives are still built in the spool; once uploaded each one moves to
+# <spool>/.shipped/, which lets the next cycle start. Nothing waits for the
+# destination to be emptied.
+#
+# method "azure" authenticates as the platform identity (workload identity or
+# instance metadata) that reaches the airlift container, so nothing is mounted
+# for it. That identity needs Storage Blob Data Contributor on the container.
+shipping:
+  enabled: false
+  method: azure      # the only method today
+  keepHours: 72      # retention for <spool>/.shipped/; 0 deletes after upload
+  azure:
+    account: ""      # storage account name
+    container: ""    # must already exist
+    prefix: ""       # archives land at <prefix>/<archive name>
+    endpoint: ""     # default https://<account>.blob.core.windows.net
+
 # Cycle behavior.
 cycleSeconds: 300
 historyKeep: 24

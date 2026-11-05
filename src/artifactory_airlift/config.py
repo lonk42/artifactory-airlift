@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -55,9 +55,62 @@ def _parse_byte_size(v: int | str) -> int:
     return int(num) * mult
 
 
+class AzureShipping(BaseModel):
+    """Where to put archives when ``shipping.method`` is ``azure``."""
+
+    account: str = ""
+    container: str = ""
+    # Key prefix inside the container; archives land at <prefix>/<name>.
+    prefix: str = ""
+    # Defaults to https://<account>.blob.core.windows.net. Set for a private
+    # endpoint DNS name or a non-public cloud.
+    endpoint: str = ""
+
+
+class Shipping(BaseModel):
+    """Optional upload of finished archives to an object store.
+
+    For a transport that collects from object storage rather than from the
+    spool PVC. Sender only. Archives are still built in spool_dir exactly as
+    before; once uploaded, each one moves to spool_dir/.shipped/, which reopens
+    the "one delta in flight" gate.
+
+    The azure method authenticates as the platform identity (workload identity
+    or instance metadata), which needs Storage Blob Data Contributor on the
+    container.
+    """
+
+    enabled: bool = False
+    method: Literal["azure"] = "azure"
+    # How long shipped archives stay in spool_dir/.shipped/. 0 deletes the
+    # local copy as soon as the upload commits.
+    keep_hours: int = Field(default=72, ge=0)
+    azure: AzureShipping = Field(default_factory=AzureShipping)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "Shipping":
+        if not self.enabled:
+            return self
+        if self.method == "azure":
+            missing = []
+            if not self.azure.container.strip():
+                missing.append("shipping.azure.container")
+            if not (self.azure.account.strip() or self.azure.endpoint.strip()):
+                missing.append("shipping.azure.account (or shipping.azure.endpoint)")
+            if missing:
+                raise ValueError(
+                    "shipping is enabled with method azure, so "
+                    + " and ".join(missing)
+                    + " must be set"
+                )
+        return self
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AIRLIFT_",
+        # Nested settings from env: AIRLIFT_SHIPPING__AZURE__CONTAINER.
+        env_nested_delimiter="__",
         env_file=None,
         extra="ignore",
     )
@@ -277,6 +330,8 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v
+
+    shipping: Shipping = Field(default_factory=Shipping)
 
     artifactory_uid: int = 1030
     artifactory_gid: int = 1030

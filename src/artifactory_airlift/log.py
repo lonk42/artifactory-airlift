@@ -114,6 +114,13 @@ _EVENT_TEMPLATES: dict[str, str] = {
     # Archive / export internals.
     "archive.built": "Archive built: {blob_count} blob(s), {total_bytes_human} uncompressed, packed to {size_human} ({repo_count} repo(s)) -> {path}",
     "archive.missing_blob": "Missing blob in binarystore: sha1={sha1} repo={repo} path={path}",
+    # Shipping archives to an object-store target (sender, optional).
+    "shipping.target_selected": "Ship target: {detail}.",
+    "shipping.target_unavailable": "Ship target unavailable, archives wait in spool: {error}",
+    "shipping.archive_shipped": "Shipped {archive} ({size_human}) to {url}.",
+    "shipping.upload_failed": "Upload of {archive} failed, retrying next tick: {error}",
+    "shipping.retire_failed": "Uploaded {archive} but could not move it out of the spool: {error}",
+    "shipping.ignored_on_receiver": "shipping.enabled is set but mode is receiver; shipping is sender only and is ignored.",
     "binarystore.selected": "Binarystore backend: {backend} ({detail}).",
     "binarystore.prefix_override": (
         "Binarystore key prefix overridden to {configured!r} "
@@ -194,6 +201,7 @@ _EXTRA_CONSUMED: dict[str, set[str]] = {
     # every cycle and the counts are what an operator reads.
     "synth.tree_written": {"path"},
     "aql.filter_not_applied": {"repos"},
+    "shipping.archive_shipped": {"size_bytes", "skipped", "duration_ms"},
 }
 
 
