@@ -1,12 +1,19 @@
-name: Build and publish image and chart
+name: Release
 
-# Builds the container image and packages the Helm chart, pushing both to
-# GitHub Container Registry (ghcr.io) whenever a release tag is pushed. Tags
-# of the form "v1.2.3" or bare semver "1.2.3" are both accepted; the leading
-# "v" is stripped from the resulting image tags by the metadata step. The
-# chart is pushed as an OCI artifact to oci://ghcr.io/<owner>/charts (a separate
-# repository path from the image so their tag namespaces do not collide),
-# tagged with the version in helm/Chart.yaml (kept in lockstep with the image tag).
+# A version tag ("1.2.3" or "v1.2.3") builds and publishes three things:
+#
+#   - the container image at ghcr.io/<owner>/<repo>, tagged with the version,
+#     its major.minor and latest;
+#   - the Helm chart as an OCI artifact at oci://ghcr.io/<owner>/charts, a
+#     separate repository path from the image so their tag namespaces cannot
+#     collide;
+#   - a GitHub release for the tag, carrying the image reference and digest,
+#     the chart install command, and the chart, wheel and sdist as assets.
+#
+# The tag must match the version in pyproject.toml, __init__.py and both
+# version fields of helm/Chart.yaml. The check runs before anything is pushed,
+# because the chart publishes under the Chart.yaml version rather than the tag,
+# so drift would ship a mislabelled chart.
 on:
   push:
     tags:
@@ -18,14 +25,53 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  check:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check the tag matches every version file
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pyproject=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          init=$(sed -nE 's/^__version__ = "(.*)"/\1/p' src/artifactory_airlift/__init__.py)
+          chart=$(sed -nE 's/^version: *"?([^"]*)"?/\1/p' helm/Chart.yaml)
+          app=$(sed -nE 's/^appVersion: *"?([^"]*)"?/\1/p' helm/Chart.yaml)
+          ok=1
+          for pair in "pyproject.toml:$pyproject" "__init__.py:$init" \
+                      "Chart.yaml version:$chart" "Chart.yaml appVersion:$app"; do
+            if [ "${pair##*:}" != "$tag" ]; then
+              echo "::error::Tag $tag does not match ${pair%:*} (${pair##*:})"
+              ok=0
+            fi
+          done
+          [ "$ok" = 1 ] || exit 1
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Unit tests
+        run: |
+          pip install -e '.[test]'
+          pytest -q tests/unit
+
+  publish:
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -48,6 +94,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -65,5 +112,56 @@ jobs:
 
       - name: Package and push chart
         run: |
-          helm package helm/ --destination "${RUNNER_TEMP}/chart"
-          helm push "${RUNNER_TEMP}"/chart/artifactory-airlift-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+          mkdir -p dist
+          helm package helm/ --destination dist
+          helm push dist/artifactory-airlift-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build --outdir dist
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          image="$REGISTRY/$IMAGE_NAME"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## Container image
+
+          \`\`\`
+          $image:$VERSION
+          $image@$DIGEST
+          \`\`\`
+
+          Package page: https://github.com/$OWNER/$REPO/pkgs/container/$REPO
+
+          ## Helm chart
+
+          \`\`\`sh
+          helm install artifactory-airlift oci://ghcr.io/$OWNER/charts/$REPO \\
+            --version $VERSION \\
+            --set image.repository=$image \\
+            --set image.tag=$VERSION
+          \`\`\`
+
+          Package page: https://github.com/$OWNER/$REPO/pkgs/container/charts%2F$REPO
+
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "Artifactory Airlift $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes \
+            dist/*

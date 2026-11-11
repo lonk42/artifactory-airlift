@@ -67,6 +67,7 @@ Tested against Artifactory 7.146.x.
 
 The image is published at `ghcr.io/lonk42/artifactory-airlift` and the chart at `oci://ghcr.io/lonk42/charts/artifactory-airlift`.
 Both are public.
+Each version is listed on the [releases page](https://github.com/lonk42/artifactory-airlift/releases), with its image digest, chart install command and packages.
 
 ## Quick start
 
