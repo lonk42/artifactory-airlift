@@ -59,6 +59,21 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # main() watches the config file; keep it off the real /etc path.
+    monkeypatch.setattr(entry.config, "DEFAULT_PATH", tmp_path / "config.yaml")
+
+
+@pytest.fixture(autouse=True)
+def _restore_sigterm():
+    import signal
+
+    saved = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, saved)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ArtifactoryClient, "from_settings", classmethod(lambda cls, s: _FakeClient())
@@ -170,10 +185,11 @@ def test_invalid_config_parks_instead_of_exiting(
     monkeypatch.setattr(entry.time, "sleep", sleep)
 
     # _Stop rather than ValueError: the error was logged on a loop, not raised
-    # out of main() where it would end the process.
+    # out of main() where it would end the process. The park waits by polling
+    # the config file, so the first sleep is one poll slice.
     with pytest.raises(_Stop):
         entry.main()
-    assert calls == [entry._PARK_INTERVAL_SECONDS]
+    assert calls == [entry.reload.POLL_SECONDS]
 
 
 def test_unhandled_error_in_run_parks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,11 +198,11 @@ def test_unhandled_error_in_run_parks(monkeypatch: pytest.MonkeyPatch) -> None:
     sleep, calls = _sleeper(1)
     monkeypatch.setattr(entry.time, "sleep", sleep)
 
-    def explode(settings):
+    def explode(settings, *, watcher=None):
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(sender, "run", explode)
 
     with pytest.raises(_Stop):
         entry.main()
-    assert calls == [entry._PARK_INTERVAL_SECONDS]
+    assert calls == [entry.reload.POLL_SECONDS]

@@ -6,14 +6,16 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import archive, binarystore, log, state
+from . import archive, binarystore, log, reload, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
 logger = log.get("artifactory.receiver")
 
 
-def run(settings: Settings) -> int:
+def run(
+    settings: Settings, *, watcher: reload.ConfigWatcher | None = None
+) -> int:
     state_dir = settings.state_dir
     processed_path = state_dir / "processed.jsonl"
     lock_path = state_dir / "receiver.lock"
@@ -43,6 +45,7 @@ def run(settings: Settings) -> int:
                 settings,
                 processed_path=processed_path,
                 done_dir=done_dir,
+                watcher=watcher,
             )
     except RuntimeError as exc:
         logger.error("receiver.lock_held", error=str(exc))
@@ -54,6 +57,7 @@ def _loop(
     *,
     processed_path: Path,
     done_dir: Path,
+    watcher: reload.ConfigWatcher | None = None,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
     store: "binarystore.BlobStore | None" = None
@@ -70,7 +74,7 @@ def _loop(
                     settings, component="receiver", attempt=attempt
                 )
                 if store is None:
-                    time.sleep(settings.cycle_seconds)
+                    reload.pause(watcher, settings.cycle_seconds, settings)
                     continue
                 attempt = 0
 
@@ -84,7 +88,7 @@ def _loop(
                 )
             except Exception:
                 logger.exception("receiver.cycle_failed")
-            time.sleep(settings.cycle_seconds)
+            reload.pause(watcher, settings.cycle_seconds, settings)
     finally:
         if store is not None:
             store.close()

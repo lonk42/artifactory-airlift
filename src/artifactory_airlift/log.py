@@ -144,7 +144,15 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "sender.filestore_probe_failed": "Filestore probe failed: {error}",
     "receiver.binarystore_recovered": "Binarystore usable again after {attempts} attempt(s).",
     "sender.binarystore_recovered": "Binarystore usable again after {attempts} attempt(s).",
-    "config_invalid": "Configuration is invalid: {error}. Idling; fix the config and restart.",
+    "config_invalid": (
+        "Configuration is invalid: {error}. Idling; a corrected config file is "
+        "picked up without a restart."
+    ),
+    "config_reload": "Config file changed ({changed}); restarting in place to apply it.",
+    "config_reload_noop": "Config file changed but the effective settings did not; carrying on.",
+    "config_reload_rejected": "Config file changed but is invalid; keeping the running settings: {error}",
+    "config_file_missing": "Config file {path} is missing; keeping the running settings.",
+    "shutdown": "Received {signal}; shutting down.",
     "unknown_mode": "Unknown mode {mode}. Idling; set mode to sender or receiver.",
     "parked_after_exit": "Idling after exit code {code} in mode {mode}.",
     "parked_after_fatal": "Idling after an unhandled error: {error}.",

@@ -128,6 +128,8 @@ namespace (under `artifactory.artifactory`):
               mountPath: {{ .Values.paths.stateMount }}
             - name: airlift-spool
               mountPath: {{ .Values.paths.spoolMount }}
+            # Keep this a directory mount: the sidecar applies ConfigMap edits
+            # in place, and subPath mounts never receive updates.
             - name: airlift-config
               mountPath: {{ .Values.paths.configMount }}
             - name: artifactory-volume

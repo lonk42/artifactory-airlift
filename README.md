@@ -94,6 +94,8 @@ the state PVC has to be mounted in both containers, destination repositories hav
 ## Configuration
 
 The sidecar reads `/etc/airlift/config.yaml` from the mounted ConfigMap and overlays environment variables prefixed `AIRLIFT_`, which take precedence.
+An edit to the ConfigMap is applied in place without restarting the pod.
+[Detail](docs/configuration.md#changing-settings-on-a-running-sidecar)
 The settings that come up most often:
 
 | Key | Default | Effect |

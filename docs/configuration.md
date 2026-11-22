@@ -15,6 +15,21 @@ The chart renders every key it knows unconditionally, including ones you never s
 helm template airlift ./helm -f values.yaml -s templates/configmap.yaml
 ```
 
+## Changing settings on a running sidecar
+
+Edit the ConfigMap; there is no need to restart the pod.
+The kubelet updates the mounted file in place, usually within a minute or two, and the sidecar checks it every few seconds between cycles.
+When the effective settings change, it logs which ones and restarts itself in place under the same PID, so the container does not restart and the pod stays Ready.
+A cycle in progress finishes first.
+
+An edit that fails validation is logged and ignored, and the sidecar keeps the settings it is running with.
+An edit that changes nothing in effect (a comment, or a key an environment variable overrides) is noted and ignored too.
+A sidecar idling on an invalid configuration starts over as soon as the file holds a valid one.
+
+This covers the file only.
+Environment variables are part of the pod spec, so changing one still means a new pod; keep settings you change often in the ConfigMap.
+The mount must stay a directory mount: Kubernetes never updates a `subPath` mount.
+
 ## Authentication
 
 Airlift accepts a bearer access token or a username and password pair.

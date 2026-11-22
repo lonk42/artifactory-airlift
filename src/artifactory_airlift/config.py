@@ -353,9 +353,12 @@ class Settings(BaseSettings):
         return self
 
 
+DEFAULT_PATH = Path("/etc/airlift/config.yaml")
+
+
 def load(config_path: Path | None = None) -> Settings:
     overrides: dict[str, object] = {}
-    cfg = config_path or Path("/etc/airlift/config.yaml")
+    cfg = config_path or DEFAULT_PATH
     if cfg.is_file():
         data = yaml.safe_load(cfg.read_text()) or {}
         if isinstance(data, dict):

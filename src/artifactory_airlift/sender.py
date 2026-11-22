@@ -7,14 +7,16 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import aql, archive, binarystore, log, metadata_synth, shipping, state
+from . import aql, archive, binarystore, log, metadata_synth, reload, shipping, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
 logger = log.get("artifactory.sender")
 
 
-def run(settings: Settings) -> int:
+def run(
+    settings: Settings, *, watcher: reload.ConfigWatcher | None = None
+) -> int:
     state_dir = settings.state_dir
     snapshots_dir = state_dir / "snapshots"
     exports_dir = state_dir / "exports"
@@ -45,6 +47,7 @@ def run(settings: Settings) -> int:
                 exports_dir=exports_dir,
                 cursor_path=cursor_path,
                 ledger_path=ledger_path,
+                watcher=watcher,
             )
     except RuntimeError as exc:
         logger.error("sender.lock_held", error=str(exc))
@@ -58,6 +61,7 @@ def _loop(
     exports_dir: Path,
     cursor_path: Path,
     ledger_path: Path | None = None,
+    watcher: reload.ConfigWatcher | None = None,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
     store: binarystore.BlobStore | None = None
@@ -79,7 +83,7 @@ def _loop(
                     settings, component="sender", attempt=attempt, probe=False
                 )
                 if store is None:
-                    time.sleep(settings.cycle_seconds)
+                    reload.pause(watcher, settings.cycle_seconds, settings)
                     continue
                 attempt = 0
 
@@ -98,7 +102,7 @@ def _loop(
                 _record_cycle(ledger_path, status="failed", note=str(exc))
             if shipper is not None:
                 shipper.run_once()
-            time.sleep(settings.cycle_seconds)
+            reload.pause(watcher, settings.cycle_seconds, settings)
     finally:
         if shipper is not None:
             shipper.close()

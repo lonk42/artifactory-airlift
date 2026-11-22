@@ -73,13 +73,16 @@ The underlying files are `state/snapshots/`, `state/cursor.json` and `state/cycl
 
 ## Forcing a cycle
 
-The loop runs once immediately on startup, so restarting the container is enough:
+The loop runs once immediately on startup, so restarting the airlift container is enough:
 
 ```sh
-kubectl -n <namespace> exec sts/artifactory -c airlift -- kill 1
+kubectl -n <namespace> exec sts/artifactory -c airlift -- sh -c 'kill 1'
 ```
 
+Only the sidecar restarts; Artifactory keeps running.
 `kubectl rollout restart` also works but restarts Artifactory with it.
+
+A config change needs neither: see [changing settings on a running sidecar](configuration.md#changing-settings-on-a-running-sidecar).
 
 ## Changing which repositories are synced
 
