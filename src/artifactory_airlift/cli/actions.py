@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .. import aql, archive as archive_mod, binarystore, diff, metadata_synth, sender, state
+from .. import aql, archive as archive_mod, binarystore, control, diff, metadata_synth, sender, state
 from ..artifactory_client import ArtifactoryClient
 from ..config import Settings
 from ..export_unpacker import ArtifactEntry
@@ -503,3 +503,112 @@ def import_tree(settings: Settings, path: Path) -> dict[str, Any]:
         "absent_repo_notices": absent,
         "status": "ok" if not failures else "partial",
     }
+
+
+# -- daemon control ---------------------------------------------------------
+#
+# stop, start, run and ship leave a marker under state/control/ for the
+# daemon to act on between cycles (see artifactory_airlift.control). None of
+# them takes cli.lock or asks for confirmation: writing a marker is atomic,
+# and asking the daemon to do its ordinary job is not something to guard.
+
+# How often --wait looks at the markers. Well inside the daemon's own poll.
+WAIT_POLL_SECONDS = 1.0
+
+
+def control_stop(settings: Settings, *, reason: str = "") -> dict[str, Any]:
+    path = control.control_dir(settings.state_dir) / control.STOPPED
+    existing = control.read_marker(path)
+    if existing is not None:
+        return {"stopped": True, "already": True, "marker": existing,
+                **views.control_status(settings)}
+    marker = control.write_marker(settings.state_dir, control.STOPPED, reason=reason)
+    return {"stopped": True, "already": False, "marker": marker,
+            **views.control_status(settings)}
+
+
+def control_start(settings: Settings) -> dict[str, Any]:
+    path = control.control_dir(settings.state_dir) / control.STOPPED
+    existing = control.read_marker(path)
+    if existing is not None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise CLIError(f"cannot remove {path}: {exc}") from exc
+    return {"was_stopped": existing is not None, "marker": existing,
+            **views.control_status(settings)}
+
+
+def control_request(settings: Settings, kind: str) -> dict[str, Any]:
+    """Ask the daemon for one cycle (``run``) or one shipping pass (``ship``)."""
+    name = {"run": control.RUN, "ship": control.SHIP}[kind]
+    path = control.control_dir(settings.state_dir) / name
+    replaced = control.read_marker(path) is not None
+    marker = control.write_marker(settings.state_dir, name)
+    return {"requested": kind, "replaced_pending": replaced, "marker": marker,
+            **views.control_status(settings)}
+
+
+def wait_for(
+    settings: Settings,
+    kind: str,
+    marker: dict[str, Any],
+    *,
+    timeout: float = 0,
+    on_change=None,
+) -> dict[str, Any]:
+    """Block until the daemon has served a request, or has stopped.
+
+    ``kind`` is ``run``, ``ship`` or ``stop``. A run or ship is served once
+    the daemon reports it idle with this request's ``at`` among those it has
+    taken; a stop is served once the daemon reports itself ``stopped``, which
+    it only does with no cycle in flight. ``on_change`` is called with each
+    new activity record, so a caller can show progress without this module
+    printing anything. A timeout of 0 waits for as long as it takes.
+    """
+    started = time.time()
+    last_state = None
+    while True:
+        activity = views.daemon_activity(settings)
+        running = common.daemon_running(settings)
+        state_now = (activity or {}).get("state")
+        if activity and state_now != last_state:
+            last_state = state_now
+            if on_change is not None:
+                on_change(activity)
+
+        if kind == "stop":
+            if state_now == "stopped" and running:
+                return {"done": True, "activity": activity}
+        else:
+            served = ((activity or {}).get("served") or {}).get(kind)
+            if (
+                running
+                and served == marker.get("at")
+                and state_now in ("waiting", "stopped")
+            ):
+                return {"done": True, "activity": activity,
+                        **_outcome(settings, kind, marker)}
+
+        if timeout and time.time() - started >= timeout:
+            return {"done": False, "timed_out": True, "activity": activity}
+        time.sleep(WAIT_POLL_SECONDS)
+
+
+def _outcome(settings: Settings, kind: str, marker: dict[str, Any]) -> dict[str, Any]:
+    """The ledger row the request produced, when there is one to show."""
+    # Ledgers record whole seconds.
+    at = int(float(marker.get("at") or 0))
+    if kind == "ship":
+        rows = common.read_ledger(settings.state_dir / "shipped.jsonl")
+        rows = [r for r in rows if float(r.get("at") or 0) >= at]
+        return {"rows": rows}
+    if settings.mode == "sender":
+        rows = common.read_ledger(common.sender_ledger_path(settings))
+        rows = [r for r in rows if float(r.get("at") or 0) >= at]
+        return {"rows": rows[-1:]}
+    rows = common.read_ledger(common.receiver_ledger_path(settings))
+    rows = [r for r in rows if float(r.get("processed_at") or 0) >= at]
+    return {"rows": rows}

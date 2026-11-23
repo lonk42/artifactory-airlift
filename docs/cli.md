@@ -20,6 +20,8 @@ Airlift's own logging goes to stderr and is quiet unless `-v` is given, so stdou
 airlift
   mode         sender (artifactory-a)
   daemon       running (holds the state lock)
+  schedule     running
+  activity     waiting for the next cycle, since 4s ago
   artifactory  OK http://localhost:8081/artifactory (12ms)
   binarystore  OK s3 bucket artifactory-a at http://minio:9000 (prefix 'artifactory/filestore')
 
@@ -43,6 +45,41 @@ Add `--write-probe` to write and remove a probe object; the receiver does this a
 
 `airlift repos` lists every repository with its package type and whether the current allowlist and denylists admit it, which answers what a cycle will cover before a cycle answers it.
 `--counts` adds an artifact count per repository.
+
+## Stopping and starting
+
+| Command | Does |
+|---|---|
+| `airlift stop [--reason TEXT]` | Holds scheduled cycles until `start` |
+| `airlift start` | Resumes the schedule, with a cycle straight away |
+| `airlift run` | Runs one cycle now, stopped or not |
+| `airlift ship` | Uploads pending archives to the ship target now, without a cycle (sender, with shipping enabled) |
+
+`stop`, `run` and `ship` take `--wait`, which blocks until the daemon has done it, and `--timeout SECONDS`.
+`stop --wait` returns once no cycle is in flight.
+
+```console
+$ airlift run --wait
+Requested a cycle.
+The daemon picks it up within a few seconds.
+  daemon: waiting for the next cycle, since 12s ago
+  daemon: in a cycle (requested), since 0s ago
+  daemon: waiting for the next cycle, since 0s ago
+Done.
+```
+
+The daemon acts on these between cycles, within five seconds.
+A cycle in progress is never interrupted; a request made during one runs after it.
+A stopped daemon also stops shipping, except for a `ship` request.
+`run` while stopped runs one cycle and leaves the daemon stopped.
+The sender's pending-archive gate still applies: `run` with an archive in the spool skips the same way a scheduled cycle does.
+
+**A container start clears a stop.**
+A sidecar restarted by Kubernetes always runs.
+A config reload restarts the process in the same container and keeps the stop.
+
+`airlift status` shows the schedule, what the daemon is doing, and any request it has not picked up yet.
+The state lives in `state/control/`: `stopped.json`, `run.json` and `ship.json` are written by the command line, and `activity.json` by the daemon.
 
 ## History
 
@@ -152,4 +189,5 @@ Every operation here is idempotent, so re-running is safe.
 | 0 | Success |
 | 1 | The command could not be carried out, or `blob` found nothing |
 | 2 | A check failed: `doctor`, `archive --verify`, a partial `import`, an aborted `export` |
+| 3 | `--wait` reached its `--timeout`; the request still stands |
 | 130 | Interrupted |

@@ -37,6 +37,11 @@ logger = log.get("artifactory_airlift.reload")
 # lands well inside the kubelet's own propagation delay.
 POLL_SECONDS = 5.0
 
+# Set by reexec() so the replacement process can tell a reload from a
+# container start. Deliberately not AIRLIFT_-prefixed, so the settings loader
+# never sees it.
+REEXEC_ENV = "_AIRLIFT_REEXECED"
+
 
 class ReloadRequested(BaseException):
     """Unwinds the daemon to ``main()``, which replaces the process.
@@ -129,21 +134,18 @@ class ConfigWatcher:
             time.sleep(min(POLL_SECONDS, seconds - i * POLL_SECONDS))
 
 
-def pause(watcher: ConfigWatcher | None, seconds: float, current: Settings) -> None:
-    """The cycle loops' sleep: plain without a watcher, watching with one."""
-    if watcher is None:
-        time.sleep(seconds)
-    else:
-        watcher.wait(seconds, current)
-
-
 def reexec() -> NoReturn:
     """Replace this process with a fresh airlift, keeping the PID.
 
     The environment is inherited unchanged, so env vars still outrank the
     file exactly as they did. File descriptors are close-on-exec by default
     in Python, so nothing leaks into the new image.
+
+    The one addition is a marker telling the new process it is a reload and
+    not a container start, which decides whether an operator's stop holds
+    (see :mod:`artifactory_airlift.control`).
     """
+    os.environ[REEXEC_ENV] = "1"
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()

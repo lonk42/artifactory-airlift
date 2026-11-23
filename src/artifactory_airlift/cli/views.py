@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from tenacity import stop_after_attempt
 
 from .. import archive as archive_mod
-from .. import binarystore, diff, log
+from .. import binarystore, control, diff, log
 from ..artifactory_client import ArtifactoryClient
 from ..config import Settings
 from . import common
@@ -58,6 +58,7 @@ def status(settings: Settings, *, offline: bool = False) -> dict[str, Any]:
         out["artifactory"] = _probe_artifactory(settings)
         out["binarystore"] = _probe_binarystore(settings)
 
+    out["control"] = control_status(settings)
     out["spool"] = spool_summary(settings)
     if settings.mode == "sender":
         out["sender"] = _sender_status(settings)
@@ -66,6 +67,32 @@ def status(settings: Settings, *, offline: bool = False) -> dict[str, Any]:
     else:
         out["receiver"] = _receiver_status(settings)
     return out
+
+
+def daemon_activity(settings: Settings) -> dict[str, Any] | None:
+    """What the daemon last said it was doing, or None if nothing is recorded."""
+    path = control.control_dir(settings.state_dir) / control.ACTIVITY
+    data = control.read_marker(path)
+    return data or None
+
+
+def control_status(settings: Settings) -> dict[str, Any]:
+    """Stop state, pending requests, and the daemon's current activity.
+
+    The activity record is left behind when the daemon dies, so it is only
+    reported while the daemon holds its lock.
+    """
+    directory = control.control_dir(settings.state_dir)
+    running = common.daemon_running(settings)
+    return {
+        "daemon_running": running,
+        "stopped": control.read_marker(directory / control.STOPPED),
+        "pending": {
+            "run": control.read_marker(directory / control.RUN),
+            "ship": control.read_marker(directory / control.SHIP),
+        },
+        "activity": daemon_activity(settings) if running else None,
+    }
 
 
 def call_once(client: ArtifactoryClient, method: str, *args):

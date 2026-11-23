@@ -80,6 +80,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_doctor)
 
+    wait_help = "block until the daemon has done it"
+    timeout_help = "give up waiting after this many seconds (default: no limit)"
+
+    p = add("stop", "Hold scheduled cycles until 'start'. A container start clears it.")
+    p.add_argument("--reason", default="", help="recorded with the stop and logged")
+    p.add_argument(
+        "--wait", action="store_true", help="block until no cycle is in flight"
+    )
+    p.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help=timeout_help)
+    p.set_defaults(func=cmd_stop)
+
+    p = add("start", "Resume scheduled cycles, running one straight away.")
+    p.set_defaults(func=cmd_start)
+
+    p = add("run", "Run one cycle now, whether or not cycles are stopped.")
+    p.add_argument("--wait", action="store_true", help=wait_help)
+    p.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help=timeout_help)
+    p.set_defaults(func=cmd_run)
+
+    p = add("ship", "Upload pending archives to the ship target now (sender).")
+    p.add_argument("--wait", action="store_true", help=wait_help)
+    p.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help=timeout_help)
+    p.set_defaults(func=cmd_ship)
+
     p = add("repos", "Repositories on this instance and whether the filters admit them.")
     p.add_argument(
         "--counts", action="store_true", help="include an artifact count per repository"
@@ -241,6 +265,7 @@ def cmd_status(args) -> int:
         ("version", data["version"]),
         ("daemon", _daemon_text(data["daemon_running"])),
         ("cycle", f"every {data['cycle_seconds']}s"),
+        *_control_lines(data["control"]),
     ]
     if art.get("checked"):
         header.append(
@@ -361,6 +386,169 @@ def _daemon_text(running) -> str:
     if running is None:
         return "unknown (cannot read the lock)"
     return "running (holds the state lock)" if running else "not running"
+
+
+def _control_lines(ctl: dict) -> list[tuple[str, str]]:
+    """The schedule, activity and pending-request lines of ``status``."""
+    stopped = ctl.get("stopped")
+    if stopped is not None:
+        schedule = "STOPPED " + _marker_text(stopped) + "; 'airlift start' resumes"
+    else:
+        schedule = "running"
+    lines = [("schedule", schedule)]
+    activity = ctl.get("activity")
+    if activity:
+        lines.append(("activity", _activity_text(activity)))
+    for kind, marker in (ctl.get("pending") or {}).items():
+        if marker is not None:
+            lines.append((f"pending {kind}", f"requested {_marker_text(marker)}"))
+    return lines
+
+
+def _marker_text(marker: dict) -> str:
+    text = f"by {marker.get('by') or 'unknown'} {fmt_age(marker.get('at'))}"
+    if marker.get("reason"):
+        text += f" ({marker['reason']})"
+    return text
+
+
+_ACTIVITY_WORDS = {
+    "cycle": "in a cycle",
+    "shipping": "shipping archives",
+    "waiting": "waiting for the next cycle",
+    "stopped": "idle, stopped",
+}
+
+
+def _activity_text(activity: dict) -> str:
+    what = _ACTIVITY_WORDS.get(activity.get("state"), str(activity.get("state")))
+    if activity.get("requested"):
+        what += " (requested)"
+    return f"{what}, since {fmt_age(activity.get('since'))}"
+
+
+def _not_running_note(data: dict) -> str | None:
+    if data.get("daemon_running"):
+        return None
+    if data.get("daemon_running") is None:
+        return "Cannot tell whether the daemon is running (the lock is unreadable)."
+    return (
+        "The daemon is not running here, so nothing acts on this until it does. "
+        "A container start always runs a cycle and clears a stop."
+    )
+
+
+def _wait_progress(args):
+    if args.json:
+        return None
+
+    def show(activity: dict) -> None:
+        print(f"  daemon: {_activity_text(activity)}", flush=True)
+
+    return show
+
+
+def _finish_wait(args, data: dict, result: dict, done_text: str) -> int:
+    data["wait"] = result
+    if args.json:
+        render.emit_json(data)
+    elif result.get("done"):
+        print(done_text)
+        for row in result.get("rows") or []:
+            print("  " + "  ".join(f"{k}={_cell(v)}" for k, v in row.items()
+                                   if k in _OUTCOME_KEYS))
+    else:
+        print(f"Gave up after {args.timeout:g}s; the request still stands.")
+    return 0 if result.get("done") else 3
+
+
+# Ledger fields worth a line after --wait; the rest are in 'airlift show'.
+_OUTCOME_KEYS = (
+    "cycle_id", "archive", "status", "added", "removed", "note", "error",
+    "blobs_written", "blobs_skipped",
+)
+
+
+def cmd_stop(args) -> int:
+    settings = common.load_settings(args)
+    data = actions.control_stop(settings, reason=args.reason)
+    if not args.json:
+        if data["already"]:
+            print(f"Already stopped {_marker_text(data['marker'])}.")
+        else:
+            print("Stopped. A cycle already in progress finishes; no new one starts "
+                  "until 'airlift start'.")
+        note = _not_running_note(data)
+        if note:
+            print(note)
+    if args.wait and data.get("daemon_running"):
+        result = actions.wait_for(
+            settings, "stop", data["marker"], timeout=args.timeout,
+            on_change=_wait_progress(args),
+        )
+        return _finish_wait(args, data, result, "The daemon is idle.")
+    if args.json:
+        render.emit_json(data)
+    return 0
+
+
+def cmd_start(args) -> int:
+    settings = common.load_settings(args)
+    data = actions.control_start(settings)
+    if args.json:
+        render.emit_json(data)
+        return 0
+    if data["was_stopped"]:
+        print(f"Started (was stopped {_marker_text(data['marker'])}). "
+              "A cycle runs within a few seconds, then the schedule resumes.")
+    else:
+        print("Not stopped; nothing to do.")
+    note = _not_running_note(data)
+    if note:
+        print(note)
+    return 0
+
+
+def cmd_run(args) -> int:
+    settings = common.load_settings(args)
+    return _request(args, settings, "run")
+
+
+def cmd_ship(args) -> int:
+    settings = common.load_settings(args)
+    common.require_mode(settings, "sender", "ship")
+    if not settings.shipping.enabled:
+        raise CLIError("shipping is not enabled (shipping.enabled), so there is nothing to ship")
+    return _request(args, settings, "ship")
+
+
+def _request(args, settings, kind: str) -> int:
+    data = actions.control_request(settings, kind)
+    what = "a cycle" if kind == "run" else "a shipping pass"
+    if not args.json:
+        if data["replaced_pending"]:
+            print(f"A request for {what} was already pending; it still runs once.")
+        else:
+            print(f"Requested {what}.")
+        activity = data.get("activity") or {}
+        if activity.get("state") in ("cycle", "shipping"):
+            print(f"The daemon is {_activity_text(activity)}; the request runs after that.")
+        else:
+            print("The daemon picks it up within a few seconds.")
+        if kind == "run" and data.get("stopped") is not None:
+            print("Cycles are stopped: this runs one cycle and they stay stopped.")
+        note = _not_running_note(data)
+        if note:
+            print(note)
+    if args.wait and data.get("daemon_running"):
+        result = actions.wait_for(
+            settings, kind, data["marker"], timeout=args.timeout,
+            on_change=_wait_progress(args),
+        )
+        return _finish_wait(args, data, result, "Done.")
+    if args.json:
+        render.emit_json(data)
+    return 0
 
 
 def _counter_text(counts: dict) -> str:

@@ -6,7 +6,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import archive, binarystore, log, reload, state
+from . import archive, binarystore, control, log, reload, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
@@ -41,11 +41,16 @@ def run(
 
     try:
         with state.file_lock(lock_path):
+            # Under the lock, so a second process that is about to be refused
+            # it cannot clear the running daemon's stop.
+            ctl = control.Control(state_dir, component="receiver")
+            ctl.startup()
             return _loop(
                 settings,
                 processed_path=processed_path,
                 done_dir=done_dir,
                 watcher=watcher,
+                ctl=ctl,
             )
     except RuntimeError as exc:
         logger.error("receiver.lock_held", error=str(exc))
@@ -58,12 +63,32 @@ def _loop(
     processed_path: Path,
     done_dir: Path,
     watcher: reload.ConfigWatcher | None = None,
+    ctl: control.Control | None = None,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
     store: "binarystore.BlobStore | None" = None
     attempt = 0
+    left = 0.0  # the first cycle runs at once
     try:
         while True:
+            left = control.wait(left, current=settings, watcher=watcher, control=ctl)
+            req = ctl.poll() if ctl is not None else control.Requests()
+            if req.ship is not None:
+                logger.warning("control.ship_on_receiver")
+            due = left <= 0 or req.run is not None or req.resumed
+
+            if not due or (req.stopped is not None and req.run is None):
+                if due:
+                    # A scheduled cycle that a stop holds back.
+                    left = settings.cycle_seconds
+                    logger.debug("receiver.cycle_skipped_stopped")
+                control.note(ctl, control.idle(ctl))
+                continue
+
+            left = settings.cycle_seconds
+            if req.run is not None:
+                logger.info("control.run_requested", **control.who(req.run, reason=False))
+
             # Resolved and probed in the loop rather than before it: an
             # unusable binarystore used to exit the process, which crashloops
             # the container and so keeps Artifactory's own pod from ever
@@ -74,10 +99,11 @@ def _loop(
                     settings, component="receiver", attempt=attempt
                 )
                 if store is None:
-                    reload.pause(watcher, settings.cycle_seconds, settings)
+                    control.note(ctl, control.idle(ctl))
                     continue
                 attempt = 0
 
+            control.note(ctl, "cycle", requested=req.run is not None)
             try:
                 _cycle(
                     settings,
@@ -88,7 +114,7 @@ def _loop(
                 )
             except Exception:
                 logger.exception("receiver.cycle_failed")
-            reload.pause(watcher, settings.cycle_seconds, settings)
+            control.note(ctl, control.idle(ctl))
     finally:
         if store is not None:
             store.close()

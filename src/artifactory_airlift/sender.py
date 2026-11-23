@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import aql, archive, binarystore, log, metadata_synth, reload, shipping, state
+from . import aql, archive, binarystore, control, log, metadata_synth, reload, shipping, state
 from .artifactory_client import ArtifactoryClient
 from .config import Settings
 
@@ -41,6 +41,10 @@ def run(
 
     try:
         with state.file_lock(lock_path):
+            # Under the lock, so a second process that is about to be refused
+            # it cannot clear the running daemon's stop.
+            ctl = control.Control(state_dir, component="sender")
+            ctl.startup()
             return _loop(
                 settings,
                 snapshots_dir=snapshots_dir,
@@ -48,6 +52,7 @@ def run(
                 cursor_path=cursor_path,
                 ledger_path=ledger_path,
                 watcher=watcher,
+                ctl=ctl,
             )
     except RuntimeError as exc:
         logger.error("sender.lock_held", error=str(exc))
@@ -62,16 +67,42 @@ def _loop(
     cursor_path: Path,
     ledger_path: Path | None = None,
     watcher: reload.ConfigWatcher | None = None,
+    ctl: control.Control | None = None,
 ) -> int:
     client = ArtifactoryClient.from_settings(settings)
     store: binarystore.BlobStore | None = None
     shipper = shipping.Shipper(settings) if settings.shipping.enabled else None
     attempt = 0
+    left = 0.0  # the first cycle runs at once
     try:
         while True:
+            left = control.wait(left, current=settings, watcher=watcher, control=ctl)
+            req = ctl.poll() if ctl is not None else control.Requests()
+            due = left <= 0 or req.run is not None or req.resumed
+
+            if not due or (req.stopped is not None and req.run is None):
+                if due:
+                    # A scheduled cycle that a stop holds back.
+                    left = settings.cycle_seconds
+                    logger.debug("sender.cycle_skipped_stopped")
+                # Otherwise woken early, for a ship request or a stop, and
+                # the rest of the interval is still to wait so the schedule
+                # does not drift.
+                if req.ship is not None:
+                    _ship_requested(shipper, ctl, req.ship)
+                control.note(ctl, control.idle(ctl))
+                continue
+
+            left = settings.cycle_seconds
+            if req.run is not None:
+                logger.info("control.run_requested", **control.who(req.run, reason=False))
+            if req.ship is not None and shipper is None:
+                logger.warning("control.ship_not_enabled")
+
             # Ship before the cycle as well as after it, so archives left
             # over from before a restart go up before the gate is consulted.
             if shipper is not None:
+                control.note(ctl, "shipping")
                 shipper.run_once()
 
             # Resolved in the loop rather than before it: an unusable
@@ -83,10 +114,11 @@ def _loop(
                     settings, component="sender", attempt=attempt, probe=False
                 )
                 if store is None:
-                    reload.pause(watcher, settings.cycle_seconds, settings)
+                    control.note(ctl, control.idle(ctl))
                     continue
                 attempt = 0
 
+            control.note(ctl, "cycle", requested=req.run is not None)
             try:
                 _cycle(
                     settings,
@@ -101,14 +133,29 @@ def _loop(
                 logger.exception("sender.cycle_failed")
                 _record_cycle(ledger_path, status="failed", note=str(exc))
             if shipper is not None:
+                control.note(ctl, "shipping")
                 shipper.run_once()
-            reload.pause(watcher, settings.cycle_seconds, settings)
+            control.note(ctl, control.idle(ctl))
     finally:
         if shipper is not None:
             shipper.close()
         if store is not None:
             store.close()
         client.close()
+
+
+def _ship_requested(
+    shipper: shipping.Shipper | None,
+    ctl: control.Control | None,
+    marker: dict,
+) -> None:
+    """Honour ``airlift ship`` between cycles: the shipper only, no cycle."""
+    if shipper is None:
+        logger.warning("control.ship_not_enabled")
+        return
+    logger.info("control.ship_requested", **control.who(marker, reason=False))
+    control.note(ctl, "shipping", requested=True)
+    shipper.run_once()
 
 
 def _cycle(

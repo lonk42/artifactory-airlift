@@ -49,7 +49,7 @@ Tested against Artifactory 7.146.x.
   [Detail](docs/architecture.md#failure-semantics)
 - **A rotating token file** and **private CA trust**, for environments that need them.
   [Detail](docs/configuration.md#authentication)
-- **A command line for the sidecar**, covering state, history, ad-hoc exports of a chosen time window, and recovery.
+- **A command line for the sidecar**, covering state, history, stopping and starting the schedule, one-off cycles, ad-hoc exports of a chosen time window, and recovery.
   [Detail](docs/cli.md)
 - **No exit path that can take Artifactory down.**
   A sidecar that crashloops drops the whole pod out of its Service, so airlift idles on errors instead.
@@ -160,7 +160,7 @@ If the transport collects from Azure Blob, enable `shipping` and the sender uplo
 | [docs/configuration.md](docs/configuration.md) | Authentication, retention, repository scope, and every setting |
 | [docs/binarystore.md](docs/binarystore.md) | Backend detection, credentials, Azure identity, key prefixes |
 | [docs/operations.md](docs/operations.md) | Reading the log, resets, scope changes, common issues |
-| [docs/cli.md](docs/cli.md) | The `airlift` command line: state, history, ad-hoc exports, recovery |
+| [docs/cli.md](docs/cli.md) | The `airlift` command line: state, history, stopping and starting, ad-hoc exports, recovery |
 
 ## Repository layout
 

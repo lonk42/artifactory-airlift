@@ -153,6 +153,23 @@ _EVENT_TEMPLATES: dict[str, str] = {
     "config_reload_rejected": "Config file changed but is invalid; keeping the running settings: {error}",
     "config_file_missing": "Config file {path} is missing; keeping the running settings.",
     "shutdown": "Received {signal}; shutting down.",
+
+    # Operator control (airlift stop / start / run / ship).
+    "control.stopped": "Stopped by {by} at {since} (reason: {reason}). Scheduled work is held until 'airlift start'.",
+    "control.still_stopped": "Still stopped after a config reload; stopped by {by} at {since} (reason: {reason}).",
+    "control.started": "Started again; running a cycle now and resuming the schedule.",
+    "control.stop_cleared_on_start": (
+        "Cleared a stop left by {by} at {since} (reason: {reason}): a container "
+        "start always runs."
+    ),
+    "control.stop_clear_failed": "Could not remove a stale stop marker ({error}); ignoring it for this process.",
+    "control.run_requested": "Running a cycle requested by {by} at {since}.",
+    "control.ship_requested": "Shipping requested by {by} at {since}.",
+    "control.ship_not_enabled": "Ignoring a ship request: shipping is not enabled.",
+    "control.ship_on_receiver": "Ignoring a ship request: shipping only runs on a sender.",
+    "control.request_unreadable": "Could not take the {request} request: {error}",
+    "sender.cycle_skipped_stopped": "Scheduled cycle skipped: stopped.",
+    "receiver.cycle_skipped_stopped": "Scheduled cycle skipped: stopped.",
     "unknown_mode": "Unknown mode {mode}. Idling; set mode to sender or receiver.",
     "parked_after_exit": "Idling after exit code {code} in mode {mode}.",
     "parked_after_fatal": "Idling after an unhandled error: {error}.",

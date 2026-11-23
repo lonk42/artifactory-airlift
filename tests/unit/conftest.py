@@ -15,5 +15,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _no_ambient_airlift_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
-        if name.startswith("AIRLIFT_"):
+        # _AIRLIFT_REEXECED is how a reloaded process knows it was reloaded;
+        # a test that calls the real reload.reexec() sets it in this process.
+        if name.startswith(("AIRLIFT_", "_AIRLIFT_")):
             monkeypatch.delenv(name, raising=False)
