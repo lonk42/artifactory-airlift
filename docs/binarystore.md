@@ -40,9 +40,11 @@ Explicit configuration wins when both are present.
 The chart's rendered `binarystore.xml`, usually a key in a unified Secret, is never encrypted, so one mount supplies the bucket, prefix, endpoint *and* credentials with nothing restated in your values.
 Set `binarystore.configFrom.existingSecret` and the chart wires the mount, the `AIRLIFT_BINARYSTORE_CONFIG` variable, and a projection of just the `binarystore.xml` key, since such Secrets often also carry the instance master and join keys.
 
-**For a credential-free store, use Artifactory's own copy and mount nothing extra.**
-Where the provider authenticates as a platform identity there is nothing for Artifactory to encrypt, both copies are equivalent, and the whole `configFrom` apparatus is overhead.
-The `artifactory-volume` mount the sidecar already needs is enough.
+**For a credential-free Azure store, Artifactory's own copy needs `binarystore_account`.**
+Artifactory encrypts `<accountName>` too, about half a minute after boot, even when the provider uses a platform identity and holds no key.
+Airlift treats the encrypted name as absent; set `binarystore_account` to the storage account name and Artifactory's own copy is enough, with no extra mount.
+Without it, a process that reads the file after Artifactory has rewritten it fails with a message naming the setting.
+A daemon that happened to read the file first keeps working only until it restarts or reloads its config.
 
 ## Azure without a key
 

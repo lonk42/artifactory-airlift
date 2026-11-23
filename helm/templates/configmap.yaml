@@ -24,6 +24,9 @@ data:
     {{- end }}
     binarystore_provider: {{ .Values.binarystore.provider | quote }}
     binarystore_prefix: {{ .Values.binarystore.prefix | quote }}
+    {{- if .Values.binarystore.account }}
+    binarystore_account: {{ .Values.binarystore.account | quote }}
+    {{- end }}
     binarystore_multipart_threshold: {{ .Values.binarystore.multipartThreshold | quote }}
     {{- if .Values.binarystore.caCert.existingConfigMap }}
     binarystore_ca_cert: {{ printf "%s/%s" .Values.binarystore.caCert.mountPath .Values.binarystore.caCert.key | quote }}

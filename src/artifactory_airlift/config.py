@@ -200,6 +200,14 @@ class Settings(BaseSettings):
     # empty string means "unset", so it cannot express that on its own.
     binarystore_prefix: str = ""
 
+    # Azure storage account name, for when binarystore.xml cannot supply it.
+    # Artifactory encrypts <accountName> in its own copy of the file in place
+    # (about half a minute after boot), so whichever process reads the file
+    # after that sees only an encrypted envelope. Empty (default) takes the
+    # name from the XML. Not a secret. An explicit <endpoint> in the XML is
+    # kept; only the derived https://<account>.blob.core.windows.net changes.
+    binarystore_account: str = ""
+
     # Object-storage credentials. These cannot be taken from binarystore.xml:
     # Artifactory rewrites <identity>/<credential>/<accountKey> encrypted, as
     # an opaque "<keyId>.<algorithm>.<ciphertext>" envelope that needs the

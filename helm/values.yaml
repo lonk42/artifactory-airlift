@@ -132,6 +132,12 @@ binarystore:
   # every blob read returning 404 and entries deferring forever.
   prefix: ""
 
+  # Azure storage account name. Empty takes it from binarystore.xml. Set it
+  # when Artifactory has encrypted <accountName> in its own copy of the file,
+  # which it does shortly after boot; the symptom is a DNS error such as
+  # "label empty or too long" on the first blob read. Not a secret.
+  account: ""
+
   # Secret holding the object-storage credentials. The chart references it and
   # never creates it. Leave empty for a filesystem binarystore.
   #

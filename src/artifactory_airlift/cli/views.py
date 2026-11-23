@@ -109,6 +109,7 @@ def _probe_binarystore(settings: Settings) -> dict[str, Any]:
         result["backend"] = store.kind
         result["detail"] = store.describe()
         result["prefix_override"] = settings.binarystore_prefix or None
+        result["account_override"] = settings.binarystore_account or None
     except Exception as exc:
         result["backend"] = None
         result["error"] = str(exc)
@@ -336,6 +337,34 @@ def effective_config(
 # -- doctor -----------------------------------------------------------------
 
 
+# A sha1 no real blob has. Reading it proves the store answers (DNS, TLS,
+# identity, data-plane read permission) without depending on any content.
+_ABSENT_SHA1 = "0" * 40
+
+
+def _doctor_store_read(store: binarystore.BlobStore, add) -> None:
+    """Read one absent blob, so the check reaches the store itself.
+
+    Resolving the store only parses binarystore.xml and builds a client; the
+    sender never probes, so without this a wrong account or endpoint passes
+    doctor and fails on the first blob a cycle or an export reads. A 404 is
+    the expected answer, and on Azure it also proves the identity and its
+    read permission, since a 403 is returned before the blob is looked up.
+    One attempt, for the same reason as ``call_once``.
+    """
+    fn = type(store).open
+    if hasattr(fn, "retry_with"):
+        fn = fn.retry_with(stop=stop_after_attempt(1))
+    try:
+        opened = fn(store, _ABSENT_SHA1)
+    except Exception as exc:
+        add("binarystore read", False, " ".join(str(exc).split())[:300] or type(exc).__name__)
+        return
+    if opened is not None:
+        opened[0].close()
+    add("binarystore read", True, "store answered a read")
+
+
 def _doctor_ship_target(settings: Settings, add) -> None:
     """Check the archive ship target: identity, container, write permission.
 
@@ -443,6 +472,7 @@ def doctor(settings: Settings, *, write_probe: bool = False) -> dict[str, Any]:
     try:
         store = binarystore.resolve(settings)
         add("binarystore", True, store.describe())
+        _doctor_store_read(store, add)
         if write_probe or settings.mode == "receiver":
             try:
                 store.probe()

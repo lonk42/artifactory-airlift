@@ -13,6 +13,7 @@ store and a receiver on another need no special handling.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Protocol, runtime_checkable
@@ -233,6 +234,51 @@ def _apply_prefix_override(
     return replace(cfg, prefix=prefix)
 
 
+_AZURE_ACCOUNT_RE = re.compile(r"^[a-z0-9]{3,24}$")
+
+
+def _apply_account_override(
+    cfg: BinarystoreConfig, override: str
+) -> BinarystoreConfig:
+    """Supply the Azure storage account name when the XML cannot.
+
+    Artifactory may encrypt ``<accountName>`` in its own copy of
+    binarystore.xml, and a chart-rendered binarystore.xml is often not
+    available to mount. The endpoint is rebuilt from the account unless the
+    XML stated an explicit ``<endpoint>``, which is kept.
+
+    Raises when the result still has no endpoint, naming this setting as the
+    fix, rather than letting an empty or encrypted name reach DNS.
+    """
+    if not isinstance(cfg, AzureConfig):
+        return cfg
+    account = override.strip()
+    if account:
+        if not _AZURE_ACCOUNT_RE.match(account):
+            raise UnsupportedBinarystore(
+                "binarystore_account must be a storage account name: 3 to 24 "
+                "lowercase letters and digits"
+            )
+        derived = f"https://{cfg.account}.blob.core.windows.net"
+        endpoint = cfg.endpoint_url
+        if not endpoint or endpoint == derived:
+            endpoint = f"https://{account}.blob.core.windows.net"
+        if account != cfg.account:
+            logger.info(
+                "binarystore.account_override",
+                configured=account,
+                from_xml=cfg.account or "(encrypted)",
+            )
+        cfg = replace(cfg, account=account, endpoint_url=endpoint)
+    if not cfg.endpoint_url:
+        raise UnsupportedBinarystore(
+            "<accountName> in binarystore.xml is encrypted by Artifactory; set "
+            "binarystore_account (AIRLIFT_BINARYSTORE_ACCOUNT) to the storage "
+            "account name"
+        )
+    return cfg
+
+
 def resolve(settings: "Settings") -> BlobStore:
     """Build the blob store for this side, detecting the backend from the XML.
 
@@ -272,6 +318,7 @@ def resolve(settings: "Settings") -> BlobStore:
         )
 
     cfg = _apply_prefix_override(cfg, settings.binarystore_prefix)
+    cfg = _apply_account_override(cfg, settings.binarystore_account)
 
     store = _build(cfg, settings)
     logger.info(

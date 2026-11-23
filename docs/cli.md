@@ -38,7 +38,7 @@ sender
 Environment variables outrank the mounted ConfigMap, and the chart renders every key into that ConfigMap whether or not it was set, so a file value that the environment overrides is listed as masked rather than dropped from the output.
 Credentials are replaced with their length.
 
-`airlift doctor` runs the checks actively and exits 2 if any fail: directory permissions, spool headroom, the import path restriction, ping, whether the token can list repositories, backend resolution, and the ship target when shipping is enabled.
+`airlift doctor` runs the checks actively and exits 2 if any fail: directory permissions, spool headroom, the import path restriction, ping, whether the token can list repositories, backend resolution, a read from the blob store, and the ship target when shipping is enabled.
 Add `--write-probe` to write and remove a probe object; the receiver does this anyway, the sender does not, because the source only needs read access.
 
 `airlift repos` lists every repository with its package type and whether the current allowlist and denylists admit it, which answers what a cycle will cover before a cycle answers it.

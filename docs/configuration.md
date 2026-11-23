@@ -175,6 +175,7 @@ Each upload is recorded in `state/shipped.jsonl`.
 | `snapshot_retention_months` | `AIRLIFT_SNAPSHOT_RETENTION_MONTHS` | `0` | Sender-only. Keep the newest snapshot per calendar month for N months. |
 | `binarystore_config` | `AIRLIFT_BINARYSTORE_CONFIG` | `/var/opt/jfrog/artifactory/etc/artifactory/binarystore.xml` | Artifactory's binarystore descriptor, parsed at startup to detect the backend. Absent or unparseable falls back to `filestore_root`. |
 | `binarystore_provider` | `AIRLIFT_BINARYSTORE_PROVIDER` | `auto` | Backend override. `auto` trusts the XML. `filesystem` forces the on-disk path. `s3` and `azure` assert the detected backend and fail at startup otherwise. Set it once the backend is known. |
+| `binarystore_account` | `AIRLIFT_BINARYSTORE_ACCOUNT` | `""` (from the XML) | Azure storage account name, for when Artifactory has encrypted `<accountName>`. See [credentials](binarystore.md#credentials). |
 | `binarystore_prefix` | `AIRLIFT_BINARYSTORE_PREFIX` | `""` (from the XML) | Key prefix override, the `<path>` in `<path>/<sha1[:2]>/<sha1>`. Empty takes it from the XML. Use `/` for the bucket root. See [when the prefix is not in the XML](binarystore.md#when-the-key-prefix-is-not-in-the-xml). |
 | `binarystore_access_key` | `AIRLIFT_BINARYSTORE_ACCESS_KEY` | `""` | Access key for an S3-compatible store. Needed when the XML holds no plaintext credentials, which is the case for Artifactory's own copy. Outranks the XML. |
 | `binarystore_secret_key` | `AIRLIFT_BINARYSTORE_SECRET_KEY` | `""` | Secret key paired with `binarystore_access_key`. |

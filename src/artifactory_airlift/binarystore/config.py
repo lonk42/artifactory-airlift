@@ -293,10 +293,20 @@ def _s3_endpoint(settings: ElementTree.Element | None) -> str:
     return base
 
 
-def _azure_endpoint(settings: ElementTree.Element | None, account: str) -> str:
+def _azure_endpoint(
+    settings: ElementTree.Element | None, account: str, *, account_encrypted: bool
+) -> str:
+    """The blob service URL, or "" when only an encrypted account name is known.
+
+    The empty endpoint is deliberate rather than an error here: the account
+    name can be supplied by ``binarystore_account``, and ``resolve()`` raises
+    with that remedy if it is not.
+    """
     endpoint = _text(settings, "endpoint")
     if endpoint:
         return endpoint.rstrip("/")
+    if account_encrypted:
+        return ""
     if not account:
         raise UnsupportedBinarystore(
             "Azure provider has neither <endpoint> nor <accountName>"
@@ -354,10 +364,18 @@ def parse(path: Path) -> BinarystoreConfig | None:
                 "Azure provider has no <containerName> or <container>"
             )
         _note_credentials(settings, "accountKey")
-        account = _text(settings, "accountName")
+        # Artifactory can encrypt <accountName> in its own copy as well as the
+        # key. Read literally it becomes a hostname label too long for DNS
+        # ("label empty or too long"), so it is treated as absent like the
+        # credentials, and binarystore_account supplies it instead.
+        raw_account = _text(settings, "accountName")
+        account_encrypted = _is_encrypted(raw_account)
+        account = "" if account_encrypted else raw_account
         return AzureConfig(
             container=container,
-            endpoint_url=_azure_endpoint(settings, account),
+            endpoint_url=_azure_endpoint(
+                settings, account, account_encrypted=account_encrypted
+            ),
             account=account,
             prefix=_text(settings, "path", _DEFAULT_PREFIX).strip("/"),
             account_key=_plaintext(settings, "accountKey"),
